@@ -4,6 +4,7 @@ const {
     ChannelType,
     Client,
     GatewayIntentBits,
+    MessageFlags,
     PermissionFlagsBits
 } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
@@ -84,14 +85,18 @@ async function runInitialSync(interaction, channel, lastSyncedMessageId = null) 
 
         await interaction.followUp({
             content: `Initial sync finished for ${channel}. Fetched ${result.fetchedCount} messages and saved ${result.savedCount} searchable entries.`,
-            ephemeral: true
+            flags: MessageFlags.Ephemeral
         });
     } catch (error) {
         console.error(`Initial sync failed for guild ${interaction.guildId}:`, error);
-        await interaction.followUp({
-            content: 'Setup was saved, but the initial sync failed. Check that I can view the channel, read message history, and read message content.',
-            ephemeral: true
-        });
+        try {
+            await interaction.followUp({
+                content: 'Setup was saved, but the initial sync failed. Check that I can view the channel, read message history, and read message content.',
+                flags: MessageFlags.Ephemeral
+            });
+        } catch (followUpError) {
+            console.error(`Could not send initial sync failure message for guild ${interaction.guildId}:`, followUpError.message);
+        }
     }
 }
 
@@ -127,7 +132,7 @@ async function syncAllConfiguredGuilds() {
     }
 }
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
     console.log(`Logged in as ${client.user.tag}. Bot is ready.`);
 
     try {
@@ -194,7 +199,7 @@ client.on('interactionCreate', async (interaction) => {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
         await interaction.reply({
             content: 'Only server managers can configure the help channel.',
-            ephemeral: true
+            flags: MessageFlags.Ephemeral
         });
         return;
     }
@@ -203,10 +208,12 @@ client.on('interactionCreate', async (interaction) => {
     if (!channel.isTextBased() || !channel.messages) {
         await interaction.reply({
             content: 'Please choose a normal text channel that I can read.',
-            ephemeral: true
+            flags: MessageFlags.Ephemeral
         });
         return;
     }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const { data: existingSetting, error: existingSettingError } = await supabase
         .from('guild_settings')
@@ -216,10 +223,7 @@ client.on('interactionCreate', async (interaction) => {
 
     if (existingSettingError) {
         console.error(`Could not load setup for guild ${interaction.guildId}:`, existingSettingError.message);
-        await interaction.reply({
-            content: 'I could not read the existing setup. Please try again in a moment.',
-            ephemeral: true
-        });
+        await interaction.editReply('I could not read the existing setup. Please try again in a moment.');
         return;
     }
 
@@ -240,17 +244,11 @@ client.on('interactionCreate', async (interaction) => {
 
     if (error) {
         console.error(`Could not save setup for guild ${interaction.guildId}:`, error.message);
-        await interaction.reply({
-            content: 'I could not save the setup. Please try again in a moment.',
-            ephemeral: true
-        });
+        await interaction.editReply('I could not save the setup. Please try again in a moment.');
         return;
     }
 
-    await interaction.reply({
-        content: `Configured ${channel} as the help channel. Initial sync is starting now.\n${DATA_DELETE_WARNING}`,
-        ephemeral: true
-    });
+    await interaction.editReply(`Configured ${channel} as the help channel. Initial sync is starting now.\n${DATA_DELETE_WARNING}`);
 
     runInitialSync(interaction, channel, lastSyncedMessageId);
 });
