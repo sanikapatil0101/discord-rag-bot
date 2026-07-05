@@ -136,6 +136,9 @@ async function syncAllConfiguredGuilds() {
 client.once('clientReady', async () => {
     console.log(`Logged in as ${client.user.tag}. Bot is ready.`);
 
+    const inviteLink = `https://discord.com/oauth2/authorize?client_id=${client.user.id}&scope=bot+applications.commands&permissions=274877908992`;
+    console.log(`Invite link: ${inviteLink}`);
+
     try {
         await registerCommands();
         console.log('Slash commands registered.');
