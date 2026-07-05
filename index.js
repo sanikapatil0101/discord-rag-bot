@@ -1,4 +1,5 @@
 require('dotenv').config();
+const http = require('http');
 const {
     ApplicationCommandOptionType,
     ChannelType,
@@ -149,7 +150,11 @@ client.once('clientReady', async () => {
     cron.schedule('0 0 * * *', async () => {
         console.log('Running daily incremental sync job...');
         await syncAllConfiguredGuilds();
-    });
+    }, { timezone: 'UTC' });
+
+    // Health check server for deployment platforms
+    http.createServer((req, res) => res.writeHead(200).end('OK')).listen(process.env.PORT || 3000);
+    console.log(`Health check server listening on port ${process.env.PORT || 3000}.`);
 });
 
 client.on('guildCreate', async (guild) => {

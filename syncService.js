@@ -1,3 +1,15 @@
+async function withRetry(fn, retries = 3, delayMs = 2000) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            return await fn();
+        } catch (error) {
+            if (attempt === retries) throw error;
+            console.warn(`Attempt ${attempt} failed, retrying in ${delayMs}ms...`, error.message);
+            await new Promise((res) => setTimeout(res, delayMs * attempt));
+        }
+    }
+}
+
 function buildConversationWindow(messages, index, windowSize = 2) {
     const start = Math.max(0, index - windowSize);
     const end = Math.min(messages.length, index + windowSize + 1);
@@ -6,6 +18,17 @@ function buildConversationWindow(messages, index, windowSize = 2) {
         .slice(start, end)
         .map((msg) => `${msg.author.username}: ${msg.content}`)
         .join('\n');
+}
+
+function buildEmbedText(msg, messageMap, messages, index) {
+    const referencedId = msg.reference?.messageId;
+    if (referencedId) {
+        const referencedMsg = messageMap.get(referencedId);
+        if (referencedMsg) {
+            return `Q (${referencedMsg.author.username}): ${referencedMsg.content}\nA (${msg.author.username}): ${msg.content}`;
+        }
+    }
+    return buildConversationWindow(messages, index);
 }
 
 function isHumanTextMessage(msg) {
@@ -48,12 +71,14 @@ async function saveMessageEmbeddings({ supabase, embeddingModel, messages }) {
         .filter(isHumanTextMessage)
         .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
 
+    const messageMap = new Map(messages.map((m) => [m.id, m]));
+
     let savedCount = 0;
 
     for (let index = 0; index < humanMessages.length; index++) {
         const msg = humanMessages[index];
-        const textToEmbed = buildConversationWindow(humanMessages, index);
-        const result = await embeddingModel.embedContent(textToEmbed);
+        const textToEmbed = buildEmbedText(msg, messageMap, humanMessages, index);
+        const result = await withRetry(() => embeddingModel.embedContent(textToEmbed));
         const vector = result.embedding.values;
 
         const { error } = await supabase

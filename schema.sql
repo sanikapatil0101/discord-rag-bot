@@ -75,3 +75,11 @@ as $$
   order by discord_logs.embedding <=> query_embedding
   limit match_count;
 $$;
+
+-- This tells Supabase to turn off the strict Row Level Security (RLS) 
+-- for your new table, allowing your bot to insert and update data freely.
+
+ALTER TABLE guild_settings DISABLE ROW LEVEL SECURITY;
+
+-- (Optional) If you also get this error for your logs table, you can run this too:
+ALTER TABLE discord_logs DISABLE ROW LEVEL SECURITY; 
