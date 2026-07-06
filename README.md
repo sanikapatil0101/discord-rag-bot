@@ -101,6 +101,18 @@ When admins answer questions, they should use Discord's **Reply** feature (right
 
 ---
 
+## Removing the Bot from Your Server
+
+1. Left-click on your server name at the top left
+2. Go to **Server Settings**
+3. Click **Integrations** from the left menu
+4. Scroll down until you see QuickChat under the bots/apps list
+5. Click on it and select **Remove**
+
+> All stored messages and data for your server are automatically deleted from the database once the bot is removed.
+
+---
+
 ## FAQ
 
 **Q: Can I change the help channel later?**
