@@ -173,7 +173,20 @@ If you want to switch to a different channel, just run the setup command again:
 /setup-help-channel #new-channel
 ```
 
-The bot will switch to the new channel and re-sync from the beginning.
+Because you already have stored data from the old channel, the bot will ask what you want to do with it:
+
+> *You're switching from #old-channel to #new-channel. What should happen to the old channel's stored data?*
+> **[ Keep old data ]   [ Delete old data ]**
+
+### Keep old data
+The old channel's stored Q&A pairs stay in the database and will mix with whatever gets synced from the new channel. Choose this if the old channel's content is still relevant and you want the bot to keep using it.
+
+### Delete old data
+All stored entries from the old channel are permanently removed before the new channel is synced. Choose this if the old channel's content is outdated or irrelevant to the new channel's topic.
+
+After you click either button, the bot saves the new channel and starts the initial sync automatically.
+
+> ⚠️ If you pick **Delete old data**, it cannot be undone. The bot will only know what it learns from the new channel going forward.
 
 ---
 
