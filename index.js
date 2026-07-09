@@ -1,7 +1,10 @@
 require('dotenv').config();
 const http = require('http');
 const {
+    ActionRowBuilder,
     ApplicationCommandOptionType,
+    ButtonBuilder,
+    ButtonStyle,
     ChannelType,
     Client,
     GatewayIntentBits,
@@ -216,6 +219,73 @@ client.on('guildDelete', async (guild) => {
 });
 
 client.on('interactionCreate', async (interaction) => {
+    if (interaction.isButton()) {
+        const [action, newChannelId] = interaction.customId.split(':');
+        if (action !== 'keep_old_data' && action !== 'delete_old_data') return;
+
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+            await interaction.reply({ content: 'Only server managers can do this.', flags: MessageFlags.Ephemeral });
+            return;
+        }
+
+        await interaction.deferUpdate();
+
+        const { data: setting, error: settingError } = await supabase
+            .from('guild_settings')
+            .select('help_channel_id, trusted_role_id')
+            .eq('guild_id', interaction.guildId)
+            .maybeSingle();
+
+        if (settingError || !setting) {
+            await interaction.editReply({ content: 'Could not load server settings. Please try again.', components: [] });
+            return;
+        }
+
+        if (action === 'delete_old_data') {
+            const { error: deleteError } = await supabase
+                .from('discord_logs')
+                .delete()
+                .eq('guild_id', interaction.guildId)
+                .eq('channel_id', setting.help_channel_id);
+
+            if (deleteError) {
+                console.error(`Could not delete old channel data for guild ${interaction.guildId}:`, deleteError.message);
+                await interaction.editReply({ content: 'Could not delete old data. Please try again.', components: [] });
+                return;
+            }
+        }
+
+        const { error: upsertError } = await supabase
+            .from('guild_settings')
+            .upsert({
+                guild_id: interaction.guildId,
+                help_channel_id: newChannelId,
+                last_synced_message_id: null,
+                last_synced_at: null,
+                is_active: true,
+                updated_at: new Date().toISOString()
+            }, { onConflict: 'guild_id' });
+
+        if (upsertError) {
+            console.error(`Could not save new channel for guild ${interaction.guildId}:`, upsertError.message);
+            await interaction.editReply({ content: 'Could not save the new channel. Please try again.', components: [] });
+            return;
+        }
+
+        const newChannel = await client.channels.fetch(newChannelId).catch(() => null);
+        const dataNote = action === 'delete_old_data' ? ' Old data has been deleted.' : ' Old data is kept and will mix with the new channel.';
+
+        await interaction.editReply({
+            content: `Configured ${newChannel ?? `<#${newChannelId}>`} as the help channel.${dataNote} Initial sync is starting now.\n${DATA_DELETE_WARNING}`,
+            components: []
+        });
+
+        if (newChannel) {
+            runInitialSync(interaction, newChannel, null, setting.trusted_role_id || null);
+        }
+        return;
+    }
+
     if (!interaction.isChatInputCommand()) return;
 
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
@@ -276,9 +346,29 @@ client.on('interactionCreate', async (interaction) => {
         return;
     }
 
-    const lastSyncedMessageId = existingSetting?.help_channel_id === channel.id
-        ? existingSetting.last_synced_message_id
-        : null;
+    const isSameChannel = existingSetting?.help_channel_id === channel.id;
+    const hadPreviousChannel = existingSetting?.help_channel_id && !isSameChannel;
+
+    if (hadPreviousChannel) {
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`keep_old_data:${channel.id}`)
+                .setLabel('Keep old data')
+                .setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder()
+                .setCustomId(`delete_old_data:${channel.id}`)
+                .setLabel('Delete old data')
+                .setStyle(ButtonStyle.Danger)
+        );
+
+        await interaction.editReply({
+            content: `You're switching from <#${existingSetting.help_channel_id}> to ${channel}. What should happen to the old channel's stored data?`,
+            components: [row]
+        });
+        return;
+    }
+
+    const lastSyncedMessageId = isSameChannel ? existingSetting.last_synced_message_id : null;
 
     const { error } = await supabase
         .from('guild_settings')
