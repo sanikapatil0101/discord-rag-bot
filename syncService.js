@@ -10,25 +10,19 @@ async function withRetry(fn, retries = 3, delayMs = 2000) {
     }
 }
 
-function buildConversationWindow(messages, index, windowSize = 2) {
-    const start = Math.max(0, index - windowSize);
-    const end = Math.min(messages.length, index + windowSize + 1);
-
-    return messages
-        .slice(start, end)
-        .map((msg) => `${msg.author.username}: ${msg.content}`)
-        .join('\n');
+function isTrustedMember(msg, trustedRoleId) {
+    if (!msg.member) return false;
+    if (msg.member.id === msg.guild.ownerId) return true;
+    if (trustedRoleId && msg.member.roles.cache.has(trustedRoleId)) return true;
+    return false;
 }
 
-function buildEmbedText(msg, messageMap, messages, index) {
+function buildEmbedText(msg, messageMap) {
     const referencedId = msg.reference?.messageId;
-    if (referencedId) {
-        const referencedMsg = messageMap.get(referencedId);
-        if (referencedMsg) {
-            return `Q (${referencedMsg.author.username}): ${referencedMsg.content}\nA (${msg.author.username}): ${msg.content}`;
-        }
-    }
-    return buildConversationWindow(messages, index);
+    if (!referencedId) return null;
+    const referencedMsg = messageMap.get(referencedId);
+    if (!referencedMsg) return null;
+    return `Q (${referencedMsg.author.username}): ${referencedMsg.content}\nA (${msg.author.username}): ${msg.content}`;
 }
 
 function isHumanTextMessage(msg) {
@@ -66,7 +60,7 @@ async function fetchMessagesSince(channel, lastSyncedMessageId = null) {
     return rawMessages.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
 }
 
-async function saveMessageEmbeddings({ supabase, embeddingModel, messages }) {
+async function saveMessageEmbeddings({ supabase, embeddingModel, messages, trustedRoleId }) {
     const humanMessages = messages
         .filter(isHumanTextMessage)
         .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
@@ -75,9 +69,12 @@ async function saveMessageEmbeddings({ supabase, embeddingModel, messages }) {
 
     let savedCount = 0;
 
-    for (let index = 0; index < humanMessages.length; index++) {
-        const msg = humanMessages[index];
-        const textToEmbed = buildEmbedText(msg, messageMap, humanMessages, index);
+    for (const msg of humanMessages) {
+        if (!isTrustedMember(msg, trustedRoleId)) continue;
+
+        const textToEmbed = buildEmbedText(msg, messageMap);
+        if (!textToEmbed) continue;
+
         const result = await withRetry(() => embeddingModel.embedContent(textToEmbed));
         const vector = result.embedding.values;
 
@@ -104,9 +101,9 @@ async function saveMessageEmbeddings({ supabase, embeddingModel, messages }) {
     return savedCount;
 }
 
-async function syncGuildChannel({ supabase, embeddingModel, channel, lastSyncedMessageId = null }) {
+async function syncGuildChannel({ supabase, embeddingModel, channel, lastSyncedMessageId = null, trustedRoleId = null }) {
     const messages = await fetchMessagesSince(channel, lastSyncedMessageId);
-    const savedCount = await saveMessageEmbeddings({ supabase, embeddingModel, messages });
+    const savedCount = await saveMessageEmbeddings({ supabase, embeddingModel, messages, trustedRoleId });
     const newestMessage = messages[messages.length - 1];
 
     if (newestMessage) {
@@ -144,7 +141,8 @@ async function syncConfiguredGuild({ supabase, embeddingModel, client, setting }
         supabase,
         embeddingModel,
         channel,
-        lastSyncedMessageId: setting.last_synced_message_id
+        lastSyncedMessageId: setting.last_synced_message_id,
+        trustedRoleId: setting.trusted_role_id || null
     });
 }
 

@@ -3,12 +3,16 @@ create extension if not exists vector;
 create table if not exists guild_settings (
   guild_id text primary key,
   help_channel_id text,
+  trusted_role_id text,
   last_synced_message_id text,
   last_synced_at timestamptz,
   is_active boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table guild_settings
+  add column if not exists trusted_role_id text;
 
 create table if not exists discord_logs (
   id text primary key,

@@ -71,17 +71,32 @@ async function registerCommands() {
                     required: true
                 }
             ]
+        },
+        {
+            name: 'setup-trusted-role',
+            description: 'Set the role whose replies get stored as answers by the bot.',
+            default_member_permissions: PermissionFlagsBits.ManageGuild.toString(),
+            dm_permission: false,
+            options: [
+                {
+                    name: 'role',
+                    description: 'The trusted role (e.g. @Support, @Moderator).',
+                    type: ApplicationCommandOptionType.Role,
+                    required: true
+                }
+            ]
         }
     ]);
 }
 
-async function runInitialSync(interaction, channel, lastSyncedMessageId = null) {
+async function runInitialSync(interaction, channel, lastSyncedMessageId = null, trustedRoleId = null) {
     try {
         const result = await syncGuildChannel({
             supabase,
             embeddingModel,
             channel,
-            lastSyncedMessageId
+            lastSyncedMessageId,
+            trustedRoleId
         });
 
         await interaction.followUp({
@@ -104,7 +119,7 @@ async function runInitialSync(interaction, channel, lastSyncedMessageId = null) 
 async function syncAllConfiguredGuilds() {
     const { data: settings, error } = await supabase
         .from('guild_settings')
-        .select('guild_id, help_channel_id, last_synced_message_id')
+        .select('guild_id, help_channel_id, last_synced_message_id, trusted_role_id')
         .eq('is_active', true)
         .not('help_channel_id', 'is', null);
 
@@ -202,15 +217,41 @@ client.on('guildDelete', async (guild) => {
 
 client.on('interactionCreate', async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
-    if (interaction.commandName !== 'setup-help-channel') return;
 
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
         await interaction.reply({
-            content: 'Only server managers can configure the help channel.',
+            content: 'Only server managers can run this command.',
             flags: MessageFlags.Ephemeral
         });
         return;
     }
+
+    if (interaction.commandName === 'setup-trusted-role') {
+        const role = interaction.options.getRole('role', true);
+
+        const { error } = await supabase
+            .from('guild_settings')
+            .upsert({
+                guild_id: interaction.guildId,
+                trusted_role_id: role.id,
+                is_active: true,
+                updated_at: new Date().toISOString()
+            }, { onConflict: 'guild_id' });
+
+        if (error) {
+            console.error(`Could not save trusted role for guild ${interaction.guildId}:`, error.message);
+            await interaction.reply({ content: 'Could not save the trusted role. Please try again.', flags: MessageFlags.Ephemeral });
+            return;
+        }
+
+        await interaction.reply({
+            content: `✅ Done! Only replies from **${role.name}** members and the server owner will be stored as answers.`,
+            flags: MessageFlags.Ephemeral
+        });
+        return;
+    }
+
+    if (interaction.commandName !== 'setup-help-channel') return;
 
     const channel = interaction.options.getChannel('channel', true);
     if (!channel.isTextBased() || !channel.messages) {
@@ -225,7 +266,7 @@ client.on('interactionCreate', async (interaction) => {
 
     const { data: existingSetting, error: existingSettingError } = await supabase
         .from('guild_settings')
-        .select('help_channel_id, last_synced_message_id, last_synced_at')
+        .select('help_channel_id, last_synced_message_id, last_synced_at, trusted_role_id')
         .eq('guild_id', interaction.guildId)
         .maybeSingle();
 
@@ -258,7 +299,7 @@ client.on('interactionCreate', async (interaction) => {
 
     await interaction.editReply(`Configured ${channel} as the help channel. Initial sync is starting now.\n${DATA_DELETE_WARNING}`);
 
-    runInitialSync(interaction, channel, lastSyncedMessageId);
+    runInitialSync(interaction, channel, lastSyncedMessageId, existingSetting?.trusted_role_id || null);
 });
 
 client.on('messageCreate', async (message) => {
