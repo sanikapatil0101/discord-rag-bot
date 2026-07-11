@@ -63,7 +63,7 @@ The resulting vector, along with the original text and metadata (guild ID, chann
 
 #### 2.1.4 Daily Automated Sync via node-cron
 
-The ingestion pipeline runs automatically every day at midnight UTC via a `node-cron` schedule (`0 0 * * *`). The cron job calls `syncAllConfiguredGuilds`, which queries `guild_settings` for all active servers with a configured help channel, then calls `syncConfiguredGuild` for each one. Each guild's `trusted_role_id` is passed through from the database, ensuring the daily sync respects the same access control rules as the initial sync. The cron schedule is explicitly configured with `{ timezone: 'UTC' }` to prevent drift on servers running in non-UTC system timezones.
+The ingestion pipeline runs automatically every day at midnight UTC via a `node-cron` schedule (`0 0 * * *`). The cron job calls `syncAllConfiguredGuilds`, which queries `guild_settings` joined with `guild_channels` to get every configured channel across all active servers in one query. It then loops per guild and per channel row, calling `syncConfiguredGuild` for each. Each guild's `trusted_role_id` is passed through from the database, ensuring the daily sync respects the same access control rules as the initial sync. The cron schedule is explicitly configured with `{ timezone: 'UTC' }` to prevent drift on servers running in non-UTC system timezones.
 
 ---
 
@@ -136,13 +136,15 @@ The generated answer is passed through `truncateForDiscord` before sending, whic
 
 ### 3.1 Schema Design
 
-The database consists of two tables with a deliberate separation of concerns.
+The database has three tables with a clear separation of concerns.
 
-**`guild_settings`** is the configuration store. One row per Discord server. It holds the help channel ID, the trusted role ID, the last synced message cursor, and the active status flag. This table is the source of truth for all per-server configuration and is the only table the cron job reads to determine what to sync.
+**`guild_settings`** is the server configuration store. One row per Discord server. It holds the trusted role ID and the active status flag. Notably, it does not store any channel information — that responsibility was moved to a dedicated table to support multiple channels per server.
+
+**`guild_channels`** is the channel registry. One row per configured channel per server. Each row has its own `last_synced_message_id` cursor, so incremental sync is tracked independently per channel rather than per guild. The table has a foreign key to `guild_settings` with `ON DELETE CASCADE` — when a server's settings row is deleted (on bot removal), all its channel rows are automatically cleaned up by the database without needing an explicit delete in application code.
 
 **`discord_logs`** is the knowledge store. One row per stored Q&A pair. The `id` column uses the Discord message ID as the primary key — a natural key that is globally unique, chronologically sortable (Discord uses Snowflake IDs), and eliminates the need for a separate auto-increment sequence. The `embedding` column is typed as `vector(3072)`, the native pgvector type that stores the 3072-dimensional float array and enables vector operators like `<=>`.
 
-Three B-tree indexes are defined on `discord_logs`: on `guild_id` (used in every retrieval query), `channel_id` (used when deleting old channel data during a channel switch), and `message_created_at` (used for time-based ordering). Notably, a dedicated **HNSW or IVFFlat vector index** on the `embedding` column is not defined in the current schema — at the current data scale, a sequential scan with pgvector is fast enough. At larger scale (hundreds of thousands of rows), adding an HNSW index would reduce retrieval latency from O(n) to approximately O(log n).
+Indexes are defined on `guild_channels(guild_id)` and on `discord_logs` for `guild_id`, `channel_id`, and `message_created_at`. The `channel_id` index on `discord_logs` is used when `/remove-help-channel` deletes a specific channel's stored data. Notably, a dedicated **HNSW or IVFFlat vector index** on the `embedding` column is not defined in the current schema — at the current data scale, a sequential scan with pgvector is fast enough. At larger scale (hundreds of thousands of rows), adding an HNSW index would reduce retrieval latency from O(n) to approximately O(log n).
 
 ### 3.2 Why Cosine Similarity for Text
 
@@ -164,7 +166,7 @@ Supabase's native pgvector support, generous free tier, and JavaScript SDK with 
 
 ### 4.2 Discord.js v14
 
-Discord.js is the de facto standard Node.js library for Discord bots. Its event-driven architecture maps naturally to Discord's WebSocket gateway — the `messageCreate`, `guildCreate`, `guildDelete`, and `interactionCreate` events are first-class abstractions that eliminate the need to manage WebSocket reconnection, heartbeating, and payload parsing manually. Version 14 introduced the component builder API (`ActionRowBuilder`, `ButtonBuilder`) used for the interactive channel-switch confirmation flow, and enforces explicit Gateway Intent declarations which improves security by limiting what events the bot receives.
+Discord.js is the de facto standard Node.js library for Discord bots. Its event-driven architecture maps naturally to Discord's WebSocket gateway — the `messageCreate`, `guildCreate`, `guildDelete`, and `interactionCreate` events are first-class abstractions that eliminate the need to manage WebSocket reconnection, heartbeating, and payload parsing manually. Version 14 enforces explicit Gateway Intent declarations, which improves security by limiting what events the bot receives to only what it actually needs.
 
 ### 4.3 Google Gemini API
 
@@ -238,17 +240,21 @@ The prompt injection defence (Rule 3) addresses a real attack vector: a maliciou
 
 The decision to store only Discord reply-referenced messages (rather than all messages) is a deliberate quality-over-quantity trade-off. Indexing every message in a help channel would produce a large but noisy knowledge base — casual conversation, follow-up questions, and off-topic messages would all be embedded and potentially retrieved as answers. By requiring a reply reference, the system enforces a structural signal that a human has intentionally answered a specific question. The result is a smaller but significantly higher-quality knowledge base where every stored embedding represents a verified, intentional Q&A pair.
 
-### 6.2 Idempotent Upserts Over Append-Only Inserts
+### 6.2 Multi-Channel Support via a Separate Table
+
+The original design stored `help_channel_id` and the sync cursor directly on the `guild_settings` row — one channel per server. When multi-channel support was added, the correct move was to extract channel data into a dedicated `guild_channels` table rather than adding array columns or a comma-separated field to `guild_settings`. This keeps the schema normalised: each channel row is an independent entity with its own sync cursor, and adding or removing a channel is a single row insert or delete rather than an update to a shared config row. The `ON DELETE CASCADE` foreign key means the cleanup path on bot removal stays simple — one delete on `guild_settings` cascades to all channel rows automatically.
+
+### 6.3 Idempotent Upserts Over Append-Only Inserts
 
 All writes to `discord_logs` use `upsert` with the Discord message ID as the conflict key. This means the sync pipeline can be re-run at any time — after a crash, after a model upgrade, after a schema migration — without producing duplicate records. The alternative (insert-only with a pre-check) would require a separate read before every write, doubling the number of database round-trips during a full sync of a large channel.
 
-### 6.3 In-Process Cron vs. External Job Queue
+### 6.4 In-Process Cron vs. External Job Queue
 
 The daily sync runs as an in-process `node-cron` job rather than an external queue (Redis + BullMQ). This is a deliberate simplicity trade-off. An external queue would provide job persistence (the sync survives a process restart), distributed execution, and retry visibility. However, it adds Redis as an infrastructure dependency and significant operational complexity. At the current scale — one bot process, one VM, daily syncs that complete in seconds — the in-process cron is sufficient. If the bot were to scale to thousands of servers with concurrent syncs, migrating to an external queue would be the correct next step.
 
-### 6.4 Multi-Tenant Isolation at the Query Layer
+### 6.5 Multi-Tenant Isolation at the Query Layer
 
-Multi-tenancy is enforced at the SQL query layer rather than at the application layer. Every query to `discord_logs` includes a `WHERE guild_id = target_guild_id` clause, and the `match_documents` function accepts `target_guild_id` as a required parameter. This means even if application-level logic had a bug that passed the wrong guild ID, the database function would still return only that guild's data. Isolation is a database-level guarantee, not an application-level assumption.
+Multi-tenancy is enforced at the SQL query layer rather than at the application layer. Every query to `discord_logs` includes a `WHERE guild_id = target_guild_id` clause, and the `match_documents` function accepts `target_guild_id` as a required parameter. This means even if application-level logic had a bug that passed the wrong guild ID, the database function would still return only that guild's data. Isolation is a database-level guarantee, not an application-level assumption. Importantly, `match_documents` filters by `guild_id` only — not by `channel_id` — so a question asked in any channel will search across all of that server's configured help channels at once.
 
 ---
 
