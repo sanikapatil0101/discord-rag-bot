@@ -165,28 +165,27 @@ QuickChat automatically syncs new messages from your help channel every day at *
 
 ---
 
-## Changing the Help Channel Later
+## Managing Help Channels
 
-If you want to switch to a different channel, just run the setup command again:
+QuickChat supports multiple help channels per server. Each channel's data is stored and synced independently.
+
+### Adding another channel
 
 ```
-/setup-help-channel #new-channel
+/setup-help-channel #another-channel
 ```
 
-Because you already have stored data from the old channel, the bot will ask what you want to do with it:
+The bot adds it alongside any existing channels and starts an initial sync.
 
-> *You're switching from #old-channel to #new-channel. What should happen to the old channel's stored data?*
-> **[ Keep old data ]   [ Delete old data ]**
+### Removing a channel
 
-### Keep old data
-The old channel's stored Q&A pairs stay in the database and will mix with whatever gets synced from the new channel. Choose this if the old channel's content is still relevant and you want the bot to keep using it.
+```
+/remove-help-channel #channel-to-remove
+```
 
-### Delete old data
-All stored entries from the old channel are permanently removed before the new channel is synced. Choose this if the old channel's content is outdated or irrelevant to the new channel's topic.
+This permanently deletes all stored data for that channel and stops syncing it.
 
-After you click either button, the bot saves the new channel and starts the initial sync automatically.
-
-> ⚠️ If you pick **Delete old data**, it cannot be undone. The bot will only know what it learns from the new channel going forward.
+> ⚠️ Removing a channel cannot be undone. Its stored Q&A data is deleted immediately.
 
 ---
 
@@ -229,7 +228,8 @@ The new role replaces the old one immediately.
 
 | Command | Who can use | What it does |
 |---|---|---|
-| `/setup-help-channel #channel` | Server owner / Manage Server | Sets the channel bot learns from |
+| `/setup-help-channel #channel` | Server owner / Manage Server | Adds a channel for the bot to learn from |
+| `/remove-help-channel #channel` | Server owner / Manage Server | Removes a channel and deletes its stored data |
 | `/setup-trusted-role @role` | Server owner / Manage Server | Sets who can provide answers |
 
 ---
