@@ -108,15 +108,19 @@ When admins answer questions, they must use Discord's **Reply** feature (right-c
 
 ---
 
-## Changing the Help Channel
+## Managing Help Channels
 
-Run `/setup-help-channel` again with a different channel. The bot will ask what to do with the old channel's stored data:
+QuickChat supports multiple help channels per server. Each channel's data is stored and synced independently.
 
-> *You're switching from #old-channel to #new-channel. What should happen to the old channel's stored data?*
-> **[ Keep old data ]   [ Delete old data ]**
+To add another channel:
+```
+/setup-help-channel #another-channel
+```
 
-- **Keep old data** — old Q&A pairs stay and mix with the new channel's data
-- **Delete old data** — old data is permanently removed before syncing the new channel
+To remove a channel and delete its stored data:
+```
+/remove-help-channel #channel-to-remove
+```
 
 ---
 
@@ -124,7 +128,8 @@ Run `/setup-help-channel` again with a different channel. The bot will ask what 
 
 | Command | Who can use | What it does |
 |---|---|---|
-| `/setup-help-channel #channel` | Server owner / Manage Server | Sets the channel bot learns from |
+| `/setup-help-channel #channel` | Server owner / Manage Server | Adds a channel for the bot to learn from |
+| `/remove-help-channel #channel` | Server owner / Manage Server | Removes a channel and deletes its stored data |
 | `/setup-trusted-role @role` | Server owner / Manage Server | Sets who can provide answers |
 
 ---
@@ -154,8 +159,11 @@ Run `/setup-help-channel` again with a different channel. The bot will ask what 
 
 ## FAQ
 
-**Q: Can I change the help channel later?**
-Yes. Run `/setup-help-channel` again. The bot will ask whether to keep or delete the old channel's data before switching.
+**Q: Can I add multiple help channels?**
+Yes. Run `/setup-help-channel` for each channel you want the bot to learn from. Each channel is synced independently.
+
+**Q: How do I remove a help channel?**
+Run `/remove-help-channel` and select the channel. All stored data for that channel is permanently deleted.
 
 **Q: Can I change the trusted role later?**
 Yes. Run `/setup-trusted-role` again with a different role. The new role replaces the old one immediately.
@@ -164,7 +172,7 @@ Yes. Run `/setup-trusted-role` again with a different role. The new role replace
 All stored messages and data for your server are permanently deleted from the database.
 
 **Q: Does the bot read all channels?**
-No. It only reads the specific channel you set with `/setup-help-channel`.
+No. It only reads the specific channels you add with `/setup-help-channel`.
 
 **Q: How often does the bot update its knowledge?**
 It syncs new messages from the help channel automatically every day at midnight UTC.
