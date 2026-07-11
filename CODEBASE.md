@@ -28,12 +28,9 @@ Bot Starts
     ↓
 Connects to Discord
     ↓
-Admin runs /setup-help-channel
+Admin runs /setup-help-channel #channel
     ↓
-First time or same channel → sync starts immediately
-Switching channels → bot shows Keep / Delete buttons
-    ↓
-Owner clicks button → old data kept or deleted → sync starts
+Channel row inserted into guild_channels → sync starts immediately
     ↓
 Bot fetches all messages from the channel
     ↓
@@ -43,7 +40,7 @@ Qualifying messages → Q&A pair built → Gemini embedding (vector) → saved t
     ↓
 User @mentions bot with a question
     ↓
-Question → Gemini embedding → vector similarity search in Supabase
+Question → Gemini embedding → vector similarity search in Supabase (across all configured channels)
     ↓
 Top matching Q&A pairs → sent to Gemini as context
     ↓
@@ -89,17 +86,30 @@ Enables the `pgvector` extension in Supabase PostgreSQL. Adds a `vector` data ty
 ### Table: guild_settings
 ```sql
 create table if not exists guild_settings (
-  guild_id          text primary key,
-  help_channel_id   text,
-  trusted_role_id   text,                    -- Role ID whose replies get stored as answers
-  last_synced_message_id text,
-  last_synced_at    timestamptz,
-  is_active         boolean default true,
-  created_at        timestamptz default now(),
-  updated_at        timestamptz default now()
+  guild_id        text primary key,
+  trusted_role_id text,
+  is_active       boolean not null default true,
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now()
 );
 ```
-One row per Discord server. `trusted_role_id` is optional — if null, only the server owner's replies are stored.
+One row per Discord server. `trusted_role_id` is optional — if null, only the server owner's replies are stored. No channel or sync cursor columns — those live in `guild_channels`.
+
+---
+
+### Table: guild_channels
+```sql
+create table if not exists guild_channels (
+  id          bigint generated always as identity primary key,
+  guild_id    text not null references guild_settings(guild_id) on delete cascade,
+  channel_id  text not null,
+  last_synced_message_id text,
+  last_synced_at         timestamptz,
+  created_at  timestamptz not null default now(),
+  unique(guild_id, channel_id)
+);
+```
+One row per configured channel per server. Each row has its own sync cursor (`last_synced_message_id`) so incremental sync is per-channel. `ON DELETE CASCADE` means removing the `guild_settings` row (when the bot is kicked) automatically deletes all channel rows for that server.
 
 ---
 
@@ -123,11 +133,12 @@ One row per stored Q&A pair. Only trusted member replies with a Discord reply re
 
 ### Indexes
 ```sql
+create index if not exists guild_channels_guild_id_idx on guild_channels(guild_id);
 create index if not exists discord_logs_guild_id_idx on discord_logs(guild_id);
 create index if not exists discord_logs_channel_id_idx on discord_logs(channel_id);
 create index if not exists discord_logs_message_created_at_idx on discord_logs(message_created_at);
 ```
-Speed up queries that filter by `guild_id` and `channel_id`. The `channel_id` index is also used when deleting old channel data during a channel switch.
+Speed up queries that filter by `guild_id` and `channel_id`. The `channel_id` index is used when `/remove-help-channel` deletes a specific channel's stored data.
 
 ---
 
@@ -299,10 +310,10 @@ async function syncGuildChannel({ supabase, embeddingModel, channel, lastSyncedM
     const newestMessage = messages[messages.length - 1];
 
     if (newestMessage) {
-        await supabase.from('guild_settings').update({
+        await supabase.from('guild_channels').update({
             last_synced_message_id: newestMessage.id,
             last_synced_at: new Date().toISOString()
-        }).eq('guild_id', channel.guild.id);
+        }).eq('guild_id', channel.guild.id).eq('channel_id', channel.id);
     }
 
     return { fetchedCount: messages.length, savedCount, newestMessageId: newestMessage?.id };
@@ -311,26 +322,25 @@ async function syncGuildChannel({ supabase, embeddingModel, channel, lastSyncedM
 Orchestrates a full sync for one channel:
 1. Fetch all new messages since last sync
 2. Filter, embed, and save qualifying ones
-3. Update `last_synced_message_id` in `guild_settings` so the next sync only fetches new messages
+3. Update `last_synced_message_id` in `guild_channels` (filtered by both `guild_id` and `channel_id`) so the next sync only fetches new messages
 
 ---
 
 ### syncConfiguredGuild
 ```js
-async function syncConfiguredGuild({ supabase, embeddingModel, client, setting }) {
-    if (!setting.help_channel_id) return { skipped: true, reason: 'No help channel configured' };
-    const channel = await client.channels.fetch(setting.help_channel_id);
+async function syncConfiguredGuild({ supabase, embeddingModel, client, channelRow, trustedRoleId }) {
+    const channel = await client.channels.fetch(channelRow.channel_id);
     if (!channel || !channel.isTextBased() || !channel.messages) {
         return { skipped: true, reason: 'Configured help channel is not readable' };
     }
     return syncGuildChannel({
         supabase, embeddingModel, channel,
-        lastSyncedMessageId: setting.last_synced_message_id,
-        trustedRoleId: setting.trusted_role_id || null
+        lastSyncedMessageId: channelRow.last_synced_message_id,
+        trustedRoleId: trustedRoleId || null
     });
 }
 ```
-Used by the daily cron job. Takes a `guild_settings` row, fetches the Discord channel object, and calls `syncGuildChannel`. Passes `trusted_role_id` from the database so the daily sync respects the same trust rules as the initial sync.
+Used by the daily cron job. Accepts a `channelRow` from `guild_channels` and `trustedRoleId` from `guild_settings`. Fetches the Discord channel object and calls `syncGuildChannel`. The caller (`syncAllConfiguredGuilds` in `index.js`) loops over all channel rows per guild and passes each one here.
 
 ---
 
@@ -339,10 +349,7 @@ Used by the daily cron job. Takes a `guild_settings` row, fetches the Discord ch
 ### Imports
 ```js
 const {
-    ActionRowBuilder,
     ApplicationCommandOptionType,
-    ButtonBuilder,
-    ButtonStyle,
     ChannelType,
     Client,
     GatewayIntentBits,
@@ -350,8 +357,8 @@ const {
     PermissionFlagsBits
 } = require('discord.js');
 ```
-- `ActionRowBuilder` / `ButtonBuilder` / `ButtonStyle` → used to build the Keep/Delete button prompt shown when switching channels
-- `PermissionFlagsBits` → used to restrict commands and button interactions to members with Manage Server permission
+- `PermissionFlagsBits` → used to restrict slash commands to members with Manage Server permission
+- No button-related imports (`ActionRowBuilder`, `ButtonBuilder`, `ButtonStyle`) — the button flow was replaced by multi-channel support
 
 ---
 
@@ -385,6 +392,12 @@ await client.application.commands.set([
         options: [{ name: 'channel', type: ApplicationCommandOptionType.Channel, channel_types: [ChannelType.GuildText], required: true }]
     },
     {
+        name: 'remove-help-channel',
+        default_member_permissions: PermissionFlagsBits.ManageGuild.toString(),
+        dm_permission: false,
+        options: [{ name: 'channel', type: ApplicationCommandOptionType.Channel, channel_types: [ChannelType.GuildText], required: true }]
+    },
+    {
         name: 'setup-trusted-role',
         default_member_permissions: PermissionFlagsBits.ManageGuild.toString(),
         dm_permission: false,
@@ -392,9 +405,9 @@ await client.application.commands.set([
     }
 ]);
 ```
-Registers both slash commands globally with Discord.
+Registers all three slash commands globally with Discord.
 
-- `default_member_permissions` → restricts both commands to members with Manage Server permission
+- `default_member_permissions` → restricts all commands to members with Manage Server permission
 - `dm_permission: false` → commands cannot be used in DMs
 - `ApplicationCommandOptionType.Channel` / `.Role` → the option expects a channel or role mention respectively
 - `channel_types: [ChannelType.GuildText]` → only text channels are valid, not voice or forum channels
@@ -408,7 +421,26 @@ async function runInitialSync(interaction, channel, lastSyncedMessageId = null, 
     await interaction.followUp({ content: `Initial sync finished...`, flags: MessageFlags.Ephemeral });
 }
 ```
-Called without `await` from both the slash command handler and the button handler so the sync runs in the background while the owner gets an immediate confirmation. Uses `interaction.followUp` (not `editReply`) because the original reply has already been sent.
+Called without `await` from the slash command handler so the sync runs in the background while the owner gets an immediate confirmation. Uses `interaction.followUp` (not `editReply`) because the original reply has already been sent.
+
+---
+
+### syncAllConfiguredGuilds
+```js
+async function syncAllConfiguredGuilds() {
+    const { data: settings } = await supabase
+        .from('guild_settings')
+        .select('guild_id, trusted_role_id, guild_channels(channel_id, last_synced_message_id)')
+        .eq('is_active', true);
+
+    for (const setting of settings) {
+        for (const channelRow of setting.guild_channels) {
+            await syncConfiguredGuild({ supabase, embeddingModel, client, channelRow, trustedRoleId: setting.trusted_role_id });
+        }
+    }
+}
+```
+Called by the daily cron job. Queries `guild_settings` with a nested join on `guild_channels` to get all configured channels across all active servers in one query. Loops per guild then per channel row, calling `syncConfiguredGuild` for each.
 
 ---
 
@@ -432,39 +464,18 @@ client.once('clientReady', async () => {
 client.on('guildDelete', async (guild) => {
     await supabase.from('discord_logs').delete().eq('guild_id', guild.id);
     await supabase.from('guild_settings').delete().eq('guild_id', guild.id);
+    // guild_channels rows are deleted automatically via ON DELETE CASCADE
 });
 ```
-Fires when the bot is removed from a server. Deletes all stored messages and settings for that server — no data is retained after removal.
+Fires when the bot is removed from a server. Deletes all stored messages and the `guild_settings` row. The `guild_channels` rows are cleaned up automatically by the `ON DELETE CASCADE` foreign key constraint — no explicit delete needed.
 
 ---
 
 ### interactionCreate Event
 
-The handler covers three interaction types in order:
+The handler covers three commands:
 
-#### 1. Button interactions — channel switch confirmation
-```js
-if (interaction.isButton()) {
-    const [action, newChannelId] = interaction.customId.split(':');
-    if (action !== 'keep_old_data' && action !== 'delete_old_data') return;
-    ...
-}
-```
-Button `customId` is formatted as `action:channelId` (e.g. `delete_old_data:123456789`). Splitting on `:` extracts both values in one line.
-
-- `interaction.deferUpdate()` → acknowledges the button click and keeps the original message editable, without sending a new reply
-- If `delete_old_data`: deletes all `discord_logs` rows matching both `guild_id` and `channel_id` (the old channel's data only)
-- If `keep_old_data`: skips the delete, old data stays and will mix with the new channel's data
-- Either way: upserts the new `help_channel_id` into `guild_settings` and calls `runInitialSync`
-- `components: []` → clears the buttons from the message after the owner clicks one
-
-Permission check on the button:
-```js
-if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) { ... }
-```
-Prevents non-admin members from clicking the buttons if they somehow see the ephemeral message.
-
-#### 2. /setup-trusted-role
+#### 1. /setup-trusted-role
 ```js
 if (interaction.commandName === 'setup-trusted-role') {
     const role = interaction.options.getRole('role', true);
@@ -473,30 +484,34 @@ if (interaction.commandName === 'setup-trusted-role') {
 ```
 Saves the role ID to `guild_settings`. The new role takes effect immediately on the next sync and for all future answer storage. Replaces any previously configured trusted role.
 
-#### 3. /setup-help-channel
+#### 2. /remove-help-channel
 ```js
-const isSameChannel = existingSetting?.help_channel_id === channel.id;
-const hadPreviousChannel = existingSetting?.help_channel_id && !isSameChannel;
-
-if (hadPreviousChannel) {
-    // show Keep / Delete buttons
-    const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`keep_old_data:${channel.id}`).setLabel('Keep old data').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId(`delete_old_data:${channel.id}`).setLabel('Delete old data').setStyle(ButtonStyle.Danger)
-    );
-    await interaction.editReply({ content: `You're switching from <#${existingSetting.help_channel_id}> to ${channel}...`, components: [row] });
-    return;
+if (interaction.commandName === 'remove-help-channel') {
+    await supabase.from('discord_logs').delete().eq('guild_id', guildId).eq('channel_id', channel.id);
+    await supabase.from('guild_channels').delete().eq('guild_id', guildId).eq('channel_id', channel.id);
 }
 ```
-Three cases handled:
+Two sequential deletes:
+1. Delete all `discord_logs` rows for that specific channel (filtered by both `guild_id` and `channel_id`)
+2. Delete the `guild_channels` row for that channel
+
+Order matters — logs are deleted first so no orphaned data is left if the second delete fails.
+
+#### 3. /setup-help-channel
+```js
+await supabase.from('guild_channels').upsert(
+    { guild_id: interaction.guildId, channel_id: channel.id },
+    { onConflict: 'guild_id,channel_id', ignoreDuplicates: true }
+);
+```
+Two cases handled:
 
 | Scenario | Behaviour |
 |---|---|
-| First time setup (no previous channel) | Save channel, start sync immediately |
-| Same channel re-run | Resume from `last_synced_message_id`, start incremental sync |
-| Different channel (switching) | Show Keep/Delete buttons, pause — sync happens after button click |
+| New channel | Insert row into `guild_channels`, start full sync from beginning |
+| Already-added channel | `ignoreDuplicates: true` skips the upsert (preserves existing sync cursor), resumes incremental sync from `last_synced_message_id` |
 
-`ButtonStyle.Secondary` (grey) for Keep, `ButtonStyle.Danger` (red) for Delete — visual weight matches the consequence of each action.
+`ignoreDuplicates: true` is critical — without it, upserting an existing channel would reset `last_synced_message_id` to null and cause a full re-sync.
 
 ---
 
@@ -584,7 +599,7 @@ PM2 keeps the bot running 24/7 and restarts it on crash. The `env` block injects
 | Reply Gate | Only Discord reply messages are stored — no reply reference = skipped | buildEmbedText in syncService.js |
 | Upsert | Insert if not exists, update if exists | All Supabase writes |
 | Incremental Sync | Only fetch new messages since last sync using a cursor | fetchMessagesSince |
-| Button Interaction | Discord UI component used for the Keep/Delete channel switch prompt | interactionCreate in index.js |
+| Multi-channel Support | Each server can have multiple help channels; each has its own sync cursor in `guild_channels` | index.js, syncService.js |
 | Ephemeral Reply | Discord message only visible to the command user | All slash command responses |
 | Prompt Injection | Attack where stored data tries to override AI instructions | Prevented in messageCreate prompt |
 | pgvector | PostgreSQL extension for storing and searching vectors | schema.sql |
