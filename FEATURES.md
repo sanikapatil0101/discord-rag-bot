@@ -27,17 +27,17 @@ A production-deployed Discord bot that turns a server's help channel history int
 - Prevents random member messages from polluting the knowledge base
 - Trust check runs at both initial sync and every daily incremental sync
 
-## Smart Channel Switching with Data Retention Choice
+## Multi-Channel Support
 
-- When an admin switches to a different help channel, the bot pauses and presents two interactive buttons: **Keep old data** or **Delete old data**
-- Keep — old channel's Q&A pairs stay in the database and mix with the new channel's knowledge
-- Delete — old channel's rows are permanently removed from `discord_logs` before the new sync begins
-- Prevents silent data mixing while giving admins full control over what the bot knows
+- A server can have multiple help channels — each added independently via `/setup-help-channel`
+- Each channel has its own sync cursor (`last_synced_message_id`) in the `guild_channels` table — incremental sync is tracked per channel, not per server
+- Channels can be removed individually via `/remove-help-channel` — only that channel's stored data is deleted, other channels are unaffected
+- When answering a question, the bot searches across all configured channels for the server at once
 
 ## Incremental Sync with Cursor-Based Pagination
 
 - On initial setup, the bot paginates through the entire channel history in batches of 100 messages using Discord's `before` cursor
-- Tracks `last_synced_message_id` per server — daily syncs only fetch messages newer than the last processed one
+- Tracks `last_synced_message_id` per channel — daily syncs only fetch messages newer than the last processed one
 - Upserts on message ID make all syncs idempotent — safe to re-run without creating duplicates
 
 ## Daily Automated Sync
@@ -55,6 +55,7 @@ A production-deployed Discord bot that turns a server's help channel history int
 ## Automatic Data Cleanup on Bot Removal
 
 - When the bot is removed from a server, all `discord_logs` and `guild_settings` rows for that guild are permanently deleted
+- `guild_channels` rows are cleaned up automatically via `ON DELETE CASCADE` — no explicit delete needed
 - No orphaned data remains in the database after removal
 
 ## Multi-Server Isolation
