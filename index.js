@@ -1,10 +1,7 @@
 require('dotenv').config();
 const http = require('http');
 const {
-    ActionRowBuilder,
     ApplicationCommandOptionType,
-    ButtonBuilder,
-    ButtonStyle,
     ChannelType,
     Client,
     GatewayIntentBits,
@@ -62,13 +59,28 @@ async function registerCommands() {
     await client.application.commands.set([
         {
             name: 'setup-help-channel',
-            description: 'Choose the channel this bot should learn support answers from.',
+            description: 'Add a channel for the bot to learn support answers from.',
             default_member_permissions: PermissionFlagsBits.ManageGuild.toString(),
             dm_permission: false,
             options: [
                 {
                     name: 'channel',
                     description: 'The support/help channel to read and sync.',
+                    type: ApplicationCommandOptionType.Channel,
+                    channel_types: [ChannelType.GuildText],
+                    required: true
+                }
+            ]
+        },
+        {
+            name: 'remove-help-channel',
+            description: 'Remove a channel and delete its stored data.',
+            default_member_permissions: PermissionFlagsBits.ManageGuild.toString(),
+            dm_permission: false,
+            options: [
+                {
+                    name: 'channel',
+                    description: 'The channel to remove.',
                     type: ApplicationCommandOptionType.Channel,
                     channel_types: [ChannelType.GuildText],
                     required: true
@@ -122,9 +134,8 @@ async function runInitialSync(interaction, channel, lastSyncedMessageId = null, 
 async function syncAllConfiguredGuilds() {
     const { data: settings, error } = await supabase
         .from('guild_settings')
-        .select('guild_id, help_channel_id, last_synced_message_id, trusted_role_id')
-        .eq('is_active', true)
-        .not('help_channel_id', 'is', null);
+        .select('guild_id, trusted_role_id, guild_channels(channel_id, last_synced_message_id)')
+        .eq('is_active', true);
 
     if (error) {
         console.error('Could not load configured guilds:', error.message);
@@ -132,21 +143,24 @@ async function syncAllConfiguredGuilds() {
     }
 
     for (const setting of settings || []) {
-        try {
-            const result = await syncConfiguredGuild({
-                supabase,
-                embeddingModel,
-                client,
-                setting
-            });
+        for (const channelRow of setting.guild_channels || []) {
+            try {
+                const result = await syncConfiguredGuild({
+                    supabase,
+                    embeddingModel,
+                    client,
+                    channelRow,
+                    trustedRoleId: setting.trusted_role_id
+                });
 
-            if (result.skipped) {
-                console.log(`Skipped guild ${setting.guild_id}: ${result.reason}`);
-            } else {
-                console.log(`Synced guild ${setting.guild_id}: fetched ${result.fetchedCount}, saved ${result.savedCount}.`);
+                if (result.skipped) {
+                    console.log(`Skipped channel ${channelRow.channel_id} in guild ${setting.guild_id}: ${result.reason}`);
+                } else {
+                    console.log(`Synced channel ${channelRow.channel_id} in guild ${setting.guild_id}: fetched ${result.fetchedCount}, saved ${result.savedCount}.`);
+                }
+            } catch (err) {
+                console.error(`Sync failed for channel ${channelRow.channel_id} in guild ${setting.guild_id}:`, err);
             }
-        } catch (error) {
-            console.error(`Sync failed for guild ${setting.guild_id}:`, error);
         }
     }
 }
@@ -208,6 +222,7 @@ client.on('guildDelete', async (guild) => {
         console.error(`Could not delete logs for guild ${guild.id}:`, logsError.message);
     }
 
+    // guild_channels rows cascade delete when guild_settings row is deleted
     const { error: settingsError } = await supabase
         .from('guild_settings')
         .delete()
@@ -219,73 +234,6 @@ client.on('guildDelete', async (guild) => {
 });
 
 client.on('interactionCreate', async (interaction) => {
-    if (interaction.isButton()) {
-        const [action, newChannelId] = interaction.customId.split(':');
-        if (action !== 'keep_old_data' && action !== 'delete_old_data') return;
-
-        if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
-            await interaction.reply({ content: 'Only server managers can do this.', flags: MessageFlags.Ephemeral });
-            return;
-        }
-
-        await interaction.deferUpdate();
-
-        const { data: setting, error: settingError } = await supabase
-            .from('guild_settings')
-            .select('help_channel_id, trusted_role_id')
-            .eq('guild_id', interaction.guildId)
-            .maybeSingle();
-
-        if (settingError || !setting) {
-            await interaction.editReply({ content: 'Could not load server settings. Please try again.', components: [] });
-            return;
-        }
-
-        if (action === 'delete_old_data') {
-            const { error: deleteError } = await supabase
-                .from('discord_logs')
-                .delete()
-                .eq('guild_id', interaction.guildId)
-                .eq('channel_id', setting.help_channel_id);
-
-            if (deleteError) {
-                console.error(`Could not delete old channel data for guild ${interaction.guildId}:`, deleteError.message);
-                await interaction.editReply({ content: 'Could not delete old data. Please try again.', components: [] });
-                return;
-            }
-        }
-
-        const { error: upsertError } = await supabase
-            .from('guild_settings')
-            .upsert({
-                guild_id: interaction.guildId,
-                help_channel_id: newChannelId,
-                last_synced_message_id: null,
-                last_synced_at: null,
-                is_active: true,
-                updated_at: new Date().toISOString()
-            }, { onConflict: 'guild_id' });
-
-        if (upsertError) {
-            console.error(`Could not save new channel for guild ${interaction.guildId}:`, upsertError.message);
-            await interaction.editReply({ content: 'Could not save the new channel. Please try again.', components: [] });
-            return;
-        }
-
-        const newChannel = await client.channels.fetch(newChannelId).catch(() => null);
-        const dataNote = action === 'delete_old_data' ? ' Old data has been deleted.' : ' Old data is kept and will mix with the new channel.';
-
-        await interaction.editReply({
-            content: `Configured ${newChannel ?? `<#${newChannelId}>`} as the help channel.${dataNote} Initial sync is starting now.\n${DATA_DELETE_WARNING}`,
-            components: []
-        });
-
-        if (newChannel) {
-            runInitialSync(interaction, newChannel, null, setting.trusted_role_id || null);
-        }
-        return;
-    }
-
     if (!interaction.isChatInputCommand()) return;
 
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
@@ -321,6 +269,39 @@ client.on('interactionCreate', async (interaction) => {
         return;
     }
 
+    if (interaction.commandName === 'remove-help-channel') {
+        const channel = interaction.options.getChannel('channel', true);
+
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+        const { error: deleteLogsError } = await supabase
+            .from('discord_logs')
+            .delete()
+            .eq('guild_id', interaction.guildId)
+            .eq('channel_id', channel.id);
+
+        if (deleteLogsError) {
+            console.error(`Could not delete logs for channel ${channel.id}:`, deleteLogsError.message);
+            await interaction.editReply('Could not delete stored data for that channel. Please try again.');
+            return;
+        }
+
+        const { error: deleteChannelError } = await supabase
+            .from('guild_channels')
+            .delete()
+            .eq('guild_id', interaction.guildId)
+            .eq('channel_id', channel.id);
+
+        if (deleteChannelError) {
+            console.error(`Could not remove channel ${channel.id}:`, deleteChannelError.message);
+            await interaction.editReply('Could not remove the channel. Please try again.');
+            return;
+        }
+
+        await interaction.editReply(`${channel} has been removed. All stored data for that channel has been deleted.`);
+        return;
+    }
+
     if (interaction.commandName !== 'setup-help-channel') return;
 
     const channel = interaction.options.getChannel('channel', true);
@@ -336,7 +317,7 @@ client.on('interactionCreate', async (interaction) => {
 
     const { data: existingSetting, error: existingSettingError } = await supabase
         .from('guild_settings')
-        .select('help_channel_id, last_synced_message_id, last_synced_at, trusted_role_id')
+        .select('trusted_role_id')
         .eq('guild_id', interaction.guildId)
         .maybeSingle();
 
@@ -346,50 +327,40 @@ client.on('interactionCreate', async (interaction) => {
         return;
     }
 
-    const isSameChannel = existingSetting?.help_channel_id === channel.id;
-    const hadPreviousChannel = existingSetting?.help_channel_id && !isSameChannel;
+    const { data: existingChannel, error: existingChannelError } = await supabase
+        .from('guild_channels')
+        .select('last_synced_message_id')
+        .eq('guild_id', interaction.guildId)
+        .eq('channel_id', channel.id)
+        .maybeSingle();
 
-    if (hadPreviousChannel) {
-        const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-                .setCustomId(`keep_old_data:${channel.id}`)
-                .setLabel('Keep old data')
-                .setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder()
-                .setCustomId(`delete_old_data:${channel.id}`)
-                .setLabel('Delete old data')
-                .setStyle(ButtonStyle.Danger)
-        );
-
-        await interaction.editReply({
-            content: `You're switching from <#${existingSetting.help_channel_id}> to ${channel}. What should happen to the old channel's stored data?`,
-            components: [row]
-        });
+    if (existingChannelError) {
+        console.error(`Could not check channel for guild ${interaction.guildId}:`, existingChannelError.message);
+        await interaction.editReply('I could not read the existing setup. Please try again in a moment.');
         return;
     }
 
-    const lastSyncedMessageId = isSameChannel ? existingSetting.last_synced_message_id : null;
+    const { error: upsertError } = await supabase
+        .from('guild_channels')
+        .upsert(
+            { guild_id: interaction.guildId, channel_id: channel.id },
+            { onConflict: 'guild_id,channel_id', ignoreDuplicates: true }
+        );
 
-    const { error } = await supabase
-        .from('guild_settings')
-        .upsert({
-            guild_id: interaction.guildId,
-            help_channel_id: channel.id,
-            last_synced_message_id: lastSyncedMessageId,
-            last_synced_at: lastSyncedMessageId ? existingSetting.last_synced_at : null,
-            is_active: true,
-            updated_at: new Date().toISOString()
-        }, { onConflict: 'guild_id' });
-
-    if (error) {
-        console.error(`Could not save setup for guild ${interaction.guildId}:`, error.message);
+    if (upsertError) {
+        console.error(`Could not save channel for guild ${interaction.guildId}:`, upsertError.message);
         await interaction.editReply('I could not save the setup. Please try again in a moment.');
         return;
     }
 
-    await interaction.editReply(`Configured ${channel} as the help channel. Initial sync is starting now.\n${DATA_DELETE_WARNING}`);
+    const isAlreadyAdded = !!existingChannel;
+    await interaction.editReply(
+        isAlreadyAdded
+            ? `${channel} is already a help channel. Re-syncing from where it left off.\n${DATA_DELETE_WARNING}`
+            : `${channel} added as a help channel. Initial sync is starting now.\n${DATA_DELETE_WARNING}`
+    );
 
-    runInitialSync(interaction, channel, lastSyncedMessageId, existingSetting?.trusted_role_id || null);
+    runInitialSync(interaction, channel, existingChannel?.last_synced_message_id || null, existingSetting?.trusted_role_id || null);
 });
 
 client.on('messageCreate', async (message) => {
@@ -400,13 +371,13 @@ client.on('messageCreate', async (message) => {
     try {
         const { data: setting, error: settingsError } = await supabase
             .from('guild_settings')
-            .select('help_channel_id')
+            .select('guild_id, guild_channels(channel_id)')
             .eq('guild_id', message.guild.id)
             .maybeSingle();
 
         if (settingsError) throw settingsError;
 
-        if (!setting?.help_channel_id) {
+        if (!setting || !setting.guild_channels?.length) {
             await message.reply('I am not set up for this server yet. Ask an admin to run `/setup-help-channel` first.');
             return;
         }

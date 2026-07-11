@@ -2,17 +2,25 @@ create extension if not exists vector;
 
 create table if not exists guild_settings (
   guild_id text primary key,
-  help_channel_id text,
   trusted_role_id text,
-  last_synced_message_id text,
-  last_synced_at timestamptz,
   is_active boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
 
-alter table guild_settings
-  add column if not exists trusted_role_id text;
+create table if not exists guild_channels (
+  id bigint generated always as identity primary key,
+  guild_id text not null references guild_settings(guild_id) on delete cascade,
+  channel_id text not null,
+  last_synced_message_id text,
+  last_synced_at timestamptz,
+  created_at timestamptz not null default now(),
+  unique(guild_id, channel_id)
+);
+
+create index if not exists guild_channels_guild_id_idx on guild_channels(guild_id);
+
+ALTER TABLE guild_channels DISABLE ROW LEVEL SECURITY;
 
 create table if not exists discord_logs (
   id text primary key,
@@ -84,6 +92,4 @@ $$;
 -- for your new table, allowing your bot to insert and update data freely.
 
 ALTER TABLE guild_settings DISABLE ROW LEVEL SECURITY;
-
--- (Optional) If you also get this error for your logs table, you can run this too:
-ALTER TABLE discord_logs DISABLE ROW LEVEL SECURITY; 
+ALTER TABLE discord_logs DISABLE ROW LEVEL SECURITY;

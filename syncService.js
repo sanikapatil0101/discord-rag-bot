@@ -108,15 +108,16 @@ async function syncGuildChannel({ supabase, embeddingModel, channel, lastSyncedM
 
     if (newestMessage) {
         const { error } = await supabase
-            .from('guild_settings')
+            .from('guild_channels')
             .update({
                 last_synced_message_id: newestMessage.id,
                 last_synced_at: new Date().toISOString()
             })
-            .eq('guild_id', channel.guild.id);
+            .eq('guild_id', channel.guild.id)
+            .eq('channel_id', channel.id);
 
         if (error) {
-            console.error(`Error updating sync state for guild ${channel.guild.id}:`, error.message);
+            console.error(`Error updating sync state for channel ${channel.id} in guild ${channel.guild.id}:`, error.message);
         }
     }
 
@@ -127,12 +128,8 @@ async function syncGuildChannel({ supabase, embeddingModel, channel, lastSyncedM
     };
 }
 
-async function syncConfiguredGuild({ supabase, embeddingModel, client, setting }) {
-    if (!setting.help_channel_id) {
-        return { skipped: true, reason: 'No help channel configured' };
-    }
-
-    const channel = await client.channels.fetch(setting.help_channel_id);
+async function syncConfiguredGuild({ supabase, embeddingModel, client, channelRow, trustedRoleId }) {
+    const channel = await client.channels.fetch(channelRow.channel_id).catch(() => null);
     if (!channel || !channel.isTextBased() || !channel.messages) {
         return { skipped: true, reason: 'Configured help channel is not readable' };
     }
@@ -141,8 +138,8 @@ async function syncConfiguredGuild({ supabase, embeddingModel, client, setting }
         supabase,
         embeddingModel,
         channel,
-        lastSyncedMessageId: setting.last_synced_message_id,
-        trustedRoleId: setting.trusted_role_id || null
+        lastSyncedMessageId: channelRow.last_synced_message_id,
+        trustedRoleId: trustedRoleId || null
     });
 }
 
