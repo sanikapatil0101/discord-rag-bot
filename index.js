@@ -396,11 +396,13 @@ client.on('messageCreate', async (message) => {
         const embedResult = await embeddingModel.embedContent(userQuestion);
         const questionVector = embedResult.embedding.values;
 
+        // NEW: Passing both the target_guild_id AND the target_channel_id to enforce Strict Channel Isolation.
         const { data: matchedDocs, error } = await supabase.rpc('match_documents', {
             query_embedding: questionVector,
             match_threshold: 0.1,
             match_count: 8,
-            target_guild_id: message.guild.id
+            target_guild_id: message.guild.id,
+            target_channel_id: message.channel.id 
         });
 
         if (error) throw error;
