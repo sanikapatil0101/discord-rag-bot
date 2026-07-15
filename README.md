@@ -74,6 +74,11 @@ Simply **@mention the bot** followed by your question in any channel:
 
 The bot will reply with an answer based on your server's history.
 
+### Limits
+
+- Questions must be under **500 characters**
+- You can ask one question every **7 seconds** — if you ask too fast the bot will ask you to slow down
+
 ### When the Bot Can't Answer
 
 If the bot replies with:
@@ -131,6 +136,7 @@ To remove a channel and delete its stored data:
 | `/setup-help-channel #channel` | Server owner / Manage Server | Adds a channel for the bot to learn from |
 | `/remove-help-channel #channel` | Server owner / Manage Server | Removes a channel and deletes its stored data |
 | `/setup-trusted-role @role` | Server owner / Manage Server | Sets who can provide answers |
+| `/status` | Server owner / Manage Server | Shows sync state and stored entry counts |
 
 ---
 
@@ -159,6 +165,9 @@ To remove a channel and delete its stored data:
 
 ## FAQ
 
+**Q: How do I check if the bot is synced?**
+Run `/status` to see all configured help channels, when each was last synced, total stored entries, and the trusted role.
+
 **Q: Can I add multiple help channels?**
 Yes. Run `/setup-help-channel` for each channel you want the bot to learn from. Each channel is synced independently.
 
@@ -171,6 +180,9 @@ Yes. Run `/setup-trusted-role` again with a different role. The new role replace
 **Q: What happens if the bot is removed from the server?**
 All stored messages and data for your server are permanently deleted from the database.
 
+**Q: Does the bot answer questions from any channel?**
+The bot answers @mentions from any channel, but it only searches the stored history of the channel where the question was asked. Each help channel's knowledge is kept separate.
+
 **Q: Does the bot read all channels?**
 No. It only reads the specific channels you add with `/setup-help-channel`.
 
@@ -182,3 +194,9 @@ No. Only members with **Manage Server** permission can run `/setup-help-channel`
 
 **Q: Why isn't the bot storing my team's answers?**
 Make sure they are using Discord's **Reply** feature on the question message, and that they have the trusted role assigned.
+
+**Q: Why did the bot ask me to slow down?**
+There is a 7-second cooldown between questions per user. Wait a moment and ask again.
+
+**Q: My question is too long — what do I do?**
+Keep questions under 500 characters. Try summarising what you need.

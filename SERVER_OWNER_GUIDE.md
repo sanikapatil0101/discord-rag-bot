@@ -231,6 +231,7 @@ The new role replaces the old one immediately.
 | `/setup-help-channel #channel` | Server owner / Manage Server | Adds a channel for the bot to learn from |
 | `/remove-help-channel #channel` | Server owner / Manage Server | Removes a channel and deletes its stored data |
 | `/setup-trusted-role @role` | Server owner / Manage Server | Sets who can provide answers |
+| `/status` | Server owner / Manage Server | Shows sync state and stored entry counts |
 
 ---
 

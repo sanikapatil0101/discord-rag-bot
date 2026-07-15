@@ -32,7 +32,7 @@ A production-deployed Discord bot that turns a server's help channel history int
 - A server can have multiple help channels — each added independently via `/setup-help-channel`
 - Each channel has its own sync cursor (`last_synced_message_id`) in the `guild_channels` table — incremental sync is tracked per channel, not per server
 - Channels can be removed individually via `/remove-help-channel` — only that channel's stored data is deleted, other channels are unaffected
-- When answering a question, the bot searches across all configured channels for the server at once
+- When a user asks a question, the bot searches only the stored history of the channel where the question was asked — each channel's knowledge is kept separate
 
 ## Incremental Sync with Cursor-Based Pagination
 
@@ -63,10 +63,28 @@ A production-deployed Discord bot that turns a server's help channel history int
 - Every database query filters by `guild_id` — servers never see each other's stored data
 - Each server has independent channel config, trusted role, and sync state
 
-## Resilient API Calls with Retry Logic
+## Batch Embedding
+
+- During sync, all qualifying Q&A pairs are collected first, then embedded in a single `batchEmbedContents` API call
+- Reduces Gemini API round-trips from N calls (one per message) to one call per sync run
+- Retry logic wraps the entire batch call — one retry covers all texts
+
+## /status Command
+
+- Admins can run `/status` to see all configured help channels, when each was last synced (relative timestamp), total stored entries, and the trusted role
+- Queries `guild_channels`, `discord_logs` (count), and `guild_settings` in three lightweight reads
+- Reply is ephemeral — only visible to the admin who ran the command
+
+## HNSW Vector Index
+
+- An HNSW index (`vector_cosine_ops`, `m=16`, `ef_construction=64`) is defined on `discord_logs.embedding`
+- Reduces similarity search from O(n) sequential scan to approximately O(log n) at scale
+- Uses cosine ops to match the `<=>` cosine distance operator used in `match_documents`
+
+## Retry Logic with Exponential Backoff
 
 - All Gemini embedding calls are wrapped in a retry function with exponential backoff (2s, 4s, 6s)
-- Handles transient rate limit errors without crashing the sync
+- Up to 3 attempts per call — handles transient rate limit errors without crashing the sync
 
 ## Production Deployment
 

@@ -37,6 +37,13 @@ It won't know about things that have never been discussed in the server's help c
 
 ---
 
+## Limits
+
+- Questions must be under **500 characters** — if yours is too long, the bot will ask you to shorten it
+- You can ask one question every **7 seconds** — if you ask too fast, the bot will warn you to slow down
+
+---
+
 ## Tips for Better Answers
 
 - **Ask one question at a time** — the bot focuses on a single question per message
@@ -97,3 +104,9 @@ Make sure you're @mentioning it correctly (e.g. `@QuickChat`). If it still doesn
 
 **Q: Can I talk to the bot in DMs?**
 No. QuickChat only works inside the server.
+
+**Q: Why did the bot ask me to slow down?**
+There is a 7-second cooldown between questions per user. Wait a moment and ask again.
+
+**Q: My question is too long — what do I do?**
+Keep questions under 500 characters. Try summarising what you need.

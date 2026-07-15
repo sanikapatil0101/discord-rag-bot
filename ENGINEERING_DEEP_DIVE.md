@@ -55,11 +55,17 @@ Not every message in the help channel is worth storing. Storing low-quality data
 
 The significance of the Reply Gate cannot be overstated. In a busy help channel, answers frequently appear far from their corresponding questions — other messages intervene, threads diverge, and context is lost. A naive approach of embedding messages in isolation or using a sliding window of surrounding messages produces ambiguous embeddings where the model cannot reliably distinguish what is a question and what is an answer. By requiring a Discord reply reference, the system guarantees that every stored embedding represents a **clean, unambiguous question-answer pair** with a direct semantic link between the two.
 
-#### 2.1.3 Embedding Generation and Vector Storage
+#### 2.1.3 Batch Embedding Generation and Vector Storage
 
-Once a qualifying Q&A pair is constructed, the text is passed to Google Gemini's `gemini-embedding-001` model via the `withRetry` wrapper. This model produces a **3072-dimensional dense vector** — a floating-point array where each dimension encodes a learned semantic feature of the input text. Semantically similar texts produce vectors that are geometrically close in this 3072-dimensional space.
+Once all qualifying Q&A pairs have been collected for a sync run, they are embedded in a single `batchEmbedContents` API call rather than one call per message. The `saveMessageEmbeddings` function first loops through all messages, applies both gates, and builds the full list of `{ msg, textToEmbed }` pairs. Only then does it call `embeddingModel.batchEmbedContents`, passing all texts at once. The response contains an `embeddings` array in the same order as the input, so each pair is matched to its vector by index.
 
-The resulting vector, along with the original text and metadata (guild ID, channel ID, author, timestamp), is upserted into the `discord_logs` table in Supabase using the message's Discord ID as the primary key. Using `upsert` rather than `insert` makes the entire pipeline **idempotent** — the sync can be re-run at any time without creating duplicate records, which is critical for reliability in a system that runs on a daily automated schedule.
+This design reduces Gemini API round-trips from N calls (one per qualifying message) to one call per sync run. The entire batch call is wrapped in `withRetry`, so a single retry covers all texts rather than needing per-message retry logic.
+
+Each resulting vector is a **3072-dimensional dense float array** produced by Google Gemini's `gemini-embedding-001` model. Semantically similar texts produce vectors that are geometrically close in this 3072-dimensional space.
+
+The vector, along with the original text and metadata (guild ID, channel ID, author, timestamp), is upserted into the `discord_logs` table using the message's Discord ID as the primary key. Using `upsert` rather than `insert` makes the entire pipeline **idempotent** — the sync can be re-run at any time without creating duplicate records, which is critical for reliability in a system that runs on a daily automated schedule.
+
+Note: `buildEmbedText` is `async`. If the referenced question message is not present in the locally fetched batch (e.g. it was sent before the sync window), the function fetches it directly from the Discord API and caches it in the `messageMap` for subsequent lookups.
 
 #### 2.1.4 Daily Automated Sync via node-cron
 
@@ -144,7 +150,9 @@ The database has three tables with a clear separation of concerns.
 
 **`discord_logs`** is the knowledge store. One row per stored Q&A pair. The `id` column uses the Discord message ID as the primary key — a natural key that is globally unique, chronologically sortable (Discord uses Snowflake IDs), and eliminates the need for a separate auto-increment sequence. The `embedding` column is typed as `vector(3072)`, the native pgvector type that stores the 3072-dimensional float array and enables vector operators like `<=>`.
 
-Indexes are defined on `guild_channels(guild_id)` and on `discord_logs` for `guild_id`, `channel_id`, and `message_created_at`. The `channel_id` index on `discord_logs` is used when `/remove-help-channel` deletes a specific channel's stored data. Notably, a dedicated **HNSW or IVFFlat vector index** on the `embedding` column is not defined in the current schema — at the current data scale, a sequential scan with pgvector is fast enough. At larger scale (hundreds of thousands of rows), adding an HNSW index would reduce retrieval latency from O(n) to approximately O(log n).
+Indexes are defined on `guild_channels(guild_id)` and on `discord_logs` for `guild_id`, `channel_id`, and `message_created_at`. The `channel_id` index on `discord_logs` is used when `/remove-help-channel` deletes a specific channel's stored data.
+
+An **HNSW vector index** (`vector_cosine_ops`, `m=16`, `ef_construction=64`) is defined on `discord_logs.embedding`. HNSW (Hierarchical Navigable Small World) is a graph-based approximate nearest neighbour algorithm that reduces similarity search from O(n) sequential scan to approximately O(log n). The `vector_cosine_ops` operator class matches the `<=>` cosine distance operator used in `match_documents`. `m=16` controls the number of connections per node in the graph — higher values improve recall at the cost of more memory. `ef_construction=64` controls how many candidates are explored when building the index — higher values produce a better quality index at the cost of slower build time.
 
 ### 3.2 Why Cosine Similarity for Text
 
@@ -252,9 +260,9 @@ All writes to `discord_logs` use `upsert` with the Discord message ID as the con
 
 The daily sync runs as an in-process `node-cron` job rather than an external queue (Redis + BullMQ). This is a deliberate simplicity trade-off. An external queue would provide job persistence (the sync survives a process restart), distributed execution, and retry visibility. However, it adds Redis as an infrastructure dependency and significant operational complexity. At the current scale — one bot process, one VM, daily syncs that complete in seconds — the in-process cron is sufficient. If the bot were to scale to thousands of servers with concurrent syncs, migrating to an external queue would be the correct next step.
 
-### 6.5 Multi-Tenant Isolation at the Query Layer
+### 6.5 Channel-Specific Search as a Multi-Tenant Boundary
 
-Multi-tenancy is enforced at the SQL query layer rather than at the application layer. Every query to `discord_logs` includes a `WHERE guild_id = target_guild_id` clause, and the `match_documents` function accepts `target_guild_id` as a required parameter. This means even if application-level logic had a bug that passed the wrong guild ID, the database function would still return only that guild's data. Isolation is a database-level guarantee, not an application-level assumption. Importantly, `match_documents` filters by `guild_id` only — not by `channel_id` — so a question asked in any channel will search across all of that server's configured help channels at once.
+Multi-tenancy is enforced at two levels. At the guild level: every query to `discord_logs` includes a `WHERE guild_id = target_guild_id` clause — servers never see each other's data. At the channel level: `match_documents` also filters by `target_channel_id`, so a question asked in `#support` only searches `#support`'s stored history, never `#general-help`'s. This was a deliberate product decision — each help channel is treated as an independent knowledge base. The `match_documents` function accepts both `target_guild_id` and `target_channel_id` as required parameters, and the `messageCreate` handler always passes `message.channel.id` as the channel filter. Isolation is a database-level guarantee enforced by the SQL function signature, not an application-level assumption.
 
 ---
 

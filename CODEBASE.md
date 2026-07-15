@@ -36,11 +36,11 @@ Bot fetches all messages from the channel
     ↓
 Each message filtered: must be a Discord Reply AND from trusted member (owner or trusted role)
     ↓
-Qualifying messages → Q&A pair built → Gemini embedding (vector) → saved to Supabase
+All qualifying Q&A pairs collected → single batchEmbedContents call → all vectors saved to Supabase
     ↓
 User @mentions bot with a question
     ↓
-Question → Gemini embedding → vector similarity search in Supabase (across all configured channels)
+Question → Gemini embedding → vector similarity search in Supabase (channel-specific: only the channel the question was asked in)
     ↓
 Top matching Q&A pairs → sent to Gemini as context
     ↓
@@ -142,13 +142,29 @@ Speed up queries that filter by `guild_id` and `channel_id`. The `channel_id` in
 
 ---
 
+### HNSW Vector Index
+```sql
+create index if not exists discord_logs_embedding_hnsw_idx
+  on discord_logs
+  using hnsw (embedding vector_cosine_ops)
+  with (m = 16, ef_construction = 64);
+```
+An HNSW (Hierarchical Navigable Small World) index on the `embedding` column. Speeds up similarity search from a full sequential scan O(n) to approximately O(log n) at scale.
+
+- `vector_cosine_ops` → matches the `<=>` cosine distance operator used in `match_documents`
+- `m = 16` → number of connections per node in the graph. Higher = better recall, more memory
+- `ef_construction = 64` → how many candidates are explored when building the index. Higher = better quality index, slower build time
+
+---
+
 ### Function: match_documents
 ```sql
 create or replace function match_documents (
-  query_embedding  vector(3072),
-  match_threshold  float,
-  match_count      int,
-  target_guild_id  text
+  query_embedding    vector(3072),
+  match_threshold    float,
+  match_count        int,
+  target_guild_id    text,
+  target_channel_id  text
 )
 returns table (id, content, guild_id, channel_id, similarity float)
 ```
@@ -157,7 +173,7 @@ Vector similarity search function:
 2. Compares it against all stored vectors using `<=>` (cosine distance operator from pgvector)
 3. Converts distance to similarity: `1 - distance` (higher = more similar)
 4. Returns only results above the threshold, ordered by similarity
-5. Filters by `guild_id` so servers never see each other's data
+5. Filters by both `guild_id` AND `channel_id` — each channel's knowledge is kept separate. A question asked in `#support` only searches `#support`'s stored history, never another channel's
 
 ---
 
@@ -276,29 +292,43 @@ async function saveMessageEmbeddings({ supabase, embeddingModel, messages, trust
     const humanMessages = messages.filter(isHumanTextMessage).sort(...);
     const messageMap = new Map(messages.map((m) => [m.id, m]));
 
+    // Phase 1 — collect all qualifying pairs first
+    const pairs = [];
     for (const msg of humanMessages) {
-        if (!isTrustedMember(msg, trustedRoleId)) continue;  // skip non-trusted authors
+        if (!isTrustedMember(msg, trustedRoleId)) continue;
+        const textToEmbed = await buildEmbedText(msg, messageMap);
+        if (!textToEmbed) continue;
+        pairs.push({ msg, textToEmbed });
+    }
 
-        const textToEmbed = buildEmbedText(msg, messageMap);
-        if (!textToEmbed) continue;                           // skip non-reply messages
+    if (pairs.length === 0) return 0;
 
-        const result = await withRetry(() => embeddingModel.embedContent(textToEmbed));
-        const vector = result.embedding.values;
+    // Phase 2 — embed all qualifying texts in one API call
+    const batchResult = await withRetry(() =>
+        embeddingModel.batchEmbedContents({
+            requests: pairs.map(({ textToEmbed }) => ({ content: { parts: [{ text: textToEmbed }] } }))
+        })
+    );
 
+    // Phase 3 — save each pair with its corresponding vector
+    for (let i = 0; i < pairs.length; i++) {
+        const { msg, textToEmbed } = pairs[i];
+        const vector = batchResult.embeddings[i].values;
         await supabase.from('discord_logs').upsert({ id: msg.id, content: textToEmbed, embedding: vector, ... });
     }
 }
 ```
-The core embedding pipeline. A message is stored only if it passes both gates:
+The core embedding pipeline. Runs in three phases:
 
+**Phase 1 — Collect:** Loop through all human messages. A message is added to the `pairs` array only if it passes both gates:
 1. **Trust gate** — `isTrustedMember` must return true (server owner or trusted role)
-2. **Reply gate** — `buildEmbedText` must return a non-null Q&A pair (must be a Discord reply to a resolvable message)
+2. **Reply gate** — `buildEmbedText` must return a non-null Q&A pair (must be a Discord reply to a resolvable message). `buildEmbedText` is `async` — if the referenced question message is not in the local batch, it fetches it from the Discord API directly.
 
-If either check fails, the message is skipped with `continue`.
+**Phase 2 — Batch embed:** All qualifying texts are sent to Gemini in a single `batchEmbedContents` call wrapped in `withRetry`. This reduces Gemini API round-trips from N calls (one per message) to one call per sync run.
 
-`new Map(messages.map((m) => [m.id, m]))` → creates a Map from an array of `[key, value]` pairs for O(1) message lookup by ID. Built from the full unfiltered message list so reply references to non-trusted messages can still be resolved as questions.
+**Phase 3 — Save:** Loop through `pairs` by index, matching each pair to its vector at `batchResult.embeddings[i].values`. Upsert each row — insert if new, update if already exists. Makes the sync idempotent — safe to re-run without creating duplicates.
 
-`upsert` → insert if new, update if already exists. Makes the sync idempotent — safe to re-run without creating duplicates.
+`new Map(messages.map((m) => [m.id, m]))` → O(1) message lookup by ID. Built from the full unfiltered message list so reply references to non-trusted messages can still be resolved as questions.
 
 ---
 
@@ -402,15 +432,22 @@ await client.application.commands.set([
         default_member_permissions: PermissionFlagsBits.ManageGuild.toString(),
         dm_permission: false,
         options: [{ name: 'role', type: ApplicationCommandOptionType.Role, required: true }]
+    },
+    {
+        name: 'status',
+        default_member_permissions: PermissionFlagsBits.ManageGuild.toString(),
+        dm_permission: false
+        // no options — takes no arguments
     }
 ]);
 ```
-Registers all three slash commands globally with Discord.
+Registers all four slash commands globally with Discord.
 
 - `default_member_permissions` → restricts all commands to members with Manage Server permission
 - `dm_permission: false` → commands cannot be used in DMs
 - `ApplicationCommandOptionType.Channel` / `.Role` → the option expects a channel or role mention respectively
 - `channel_types: [ChannelType.GuildText]` → only text channels are valid, not voice or forum channels
+- `/status` takes no options — it reads from the database using the guild ID from the interaction
 
 ---
 
@@ -473,9 +510,42 @@ Fires when the bot is removed from a server. Deletes all stored messages and the
 
 ### interactionCreate Event
 
-The handler covers three commands:
+The handler covers four commands:
 
-#### 1. /setup-trusted-role
+#### 1. /status
+```js
+if (interaction.commandName === 'status') {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    const { data: channels } = await supabase
+        .from('guild_channels')
+        .select('channel_id, last_synced_at, last_synced_message_id')
+        .eq('guild_id', interaction.guildId);
+
+    const { data: setting } = await supabase
+        .from('guild_settings')
+        .select('trusted_role_id')
+        .eq('guild_id', interaction.guildId)
+        .maybeSingle();
+
+    const { count } = await supabase
+        .from('discord_logs')
+        .select('id', { count: 'exact', head: true })
+        .eq('guild_id', interaction.guildId);
+
+    await interaction.editReply(...);
+}
+```
+Three lightweight reads:
+1. `guild_channels` → list of configured channels with their last sync timestamps
+2. `guild_settings` → trusted role ID
+3. `discord_logs` count query with `head: true` → returns only the count, no row data fetched
+
+`last_synced_at` is formatted as a Discord relative timestamp using `<t:UNIX_SECONDS:R>` — Discord renders this as "3 hours ago", "2 days ago" etc. in the client. Reply is ephemeral — only visible to the admin who ran the command.
+
+---
+
+#### 2. /setup-trusted-role
 ```js
 if (interaction.commandName === 'setup-trusted-role') {
     const role = interaction.options.getRole('role', true);
@@ -484,7 +554,7 @@ if (interaction.commandName === 'setup-trusted-role') {
 ```
 Saves the role ID to `guild_settings`. The new role takes effect immediately on the next sync and for all future answer storage. Replaces any previously configured trusted role.
 
-#### 2. /remove-help-channel
+#### 3. /remove-help-channel
 ```js
 if (interaction.commandName === 'remove-help-channel') {
     await supabase.from('discord_logs').delete().eq('guild_id', guildId).eq('channel_id', channel.id);
@@ -497,7 +567,7 @@ Two sequential deletes:
 
 Order matters — logs are deleted first so no orphaned data is left if the second delete fails.
 
-#### 3. /setup-help-channel
+#### 4. /setup-help-channel
 ```js
 await supabase.from('guild_channels').upsert(
     { guild_id: interaction.guildId, channel_id: channel.id },
@@ -532,7 +602,8 @@ client.on('messageCreate', async (message) => {
         query_embedding: questionVector,
         match_threshold: 0.1,
         match_count: 8,
-        target_guild_id: message.guild.id
+        target_guild_id: message.guild.id,
+        target_channel_id: message.channel.id  // channel-specific: only searches the channel the question was asked in
     });
     ...
     const chatResult = await chatModel.generateContent(prompt);
@@ -546,8 +617,9 @@ Full RAG pipeline on every message:
 3. `replace(new RegExp(<@!?ID>, 'g'), '')` → strips the bot mention from the question text. `<@!?ID>` handles both `<@ID>` and `<@!ID>` Discord mention formats
 4. `embeddingModel.embedContent(userQuestion)` → converts the question to a 3072-dimension vector
 5. `supabase.rpc('match_documents', ...)` → calls the SQL function to find similar stored Q&A pairs
-6. `match_threshold: 0.1` → minimum 10% similarity. Low threshold to cast a wide net
-7. `match_count: 8` → retrieve top 8 most similar entries as context
+6. `target_channel_id: message.channel.id` → search is scoped to the channel the question was asked in — each help channel's knowledge is kept separate
+7. `match_threshold: 0.1` → minimum 10% similarity. Low threshold to cast a wide net
+8. `match_count: 8` → retrieve top 8 most similar entries as context
 8. Context is wrapped in `<CONTEXT_FROM_DATABASE>` tags with strict rules to prevent prompt injection
 9. `chatModel.generateContent(prompt)` → Gemini generates the final answer
 
@@ -600,6 +672,10 @@ PM2 keeps the bot running 24/7 and restarts it on crash. The `env` block injects
 | Upsert | Insert if not exists, update if exists | All Supabase writes |
 | Incremental Sync | Only fetch new messages since last sync using a cursor | fetchMessagesSince |
 | Multi-channel Support | Each server can have multiple help channels; each has its own sync cursor in `guild_channels` | index.js, syncService.js |
+| Batch Embedding | All qualifying Q&A pairs collected first, then embedded in one `batchEmbedContents` call | saveMessageEmbeddings in syncService.js |
+| HNSW Index | Vector index on `discord_logs.embedding` for fast O(log n) similarity search at scale | schema.sql |
+| Cooldown | Per-user 7-second cooldown between questions — warns once, then silently drops | messageCreate in index.js |
+| Question Length Limit | Max 500 characters per question | messageCreate in index.js |
 | Ephemeral Reply | Discord message only visible to the command user | All slash command responses |
 | Prompt Injection | Attack where stored data tries to override AI instructions | Prevented in messageCreate prompt |
 | pgvector | PostgreSQL extension for storing and searching vectors | schema.sql |
