@@ -23,6 +23,8 @@ create table if not exists guild_channels (
 
 create index if not exists guild_channels_guild_id_idx on guild_channels(guild_id);
 
+alter table guild_channels disable row level security;
+
 -- 4. Discord Logs Table
 create table if not exists discord_logs (
   id text primary key,
@@ -40,18 +42,26 @@ create index if not exists discord_logs_guild_id_idx on discord_logs(guild_id);
 create index if not exists discord_logs_channel_id_idx on discord_logs(channel_id);
 create index if not exists discord_logs_message_created_at_idx on discord_logs(message_created_at);
 
--- 5. Drop old functions to prevent duplicates
+-- 5. HNSW vector index for fast similarity search
+create index if not exists discord_logs_embedding_hnsw_idx
+  on discord_logs
+  using hnsw (embedding vector_cosine_ops)
+  with (m = 16, ef_construction = 64);
+
+alter table discord_logs disable row level security;
+
+-- 6. Drop old function signatures to prevent conflicts
 drop function if exists match_documents(vector, double precision, integer);
 drop function if exists match_documents(vector, double precision, integer, text);
 drop function if exists match_documents(vector, double precision, integer, text, text);
 
--- 6. The NEW Strict Channel Isolation Search Function
+-- 7. Search function — filters by guild_id and channel_id
 create or replace function match_documents (
   query_embedding vector(3072),
   match_threshold float,
   match_count int,
   target_guild_id text,
-  target_channel_id text -- <--- NEW: Requires the specific channel ID
+  target_channel_id text
 )
 returns table (
   id text,
@@ -70,13 +80,8 @@ as $$
     1 - (discord_logs.embedding <=> query_embedding) as similarity
   from discord_logs
   where discord_logs.guild_id = target_guild_id
-    and discord_logs.channel_id = target_channel_id -- <--- NEW: Filters by channel
+    and discord_logs.channel_id = target_channel_id
     and 1 - (discord_logs.embedding <=> query_embedding) > match_threshold
   order by discord_logs.embedding <=> query_embedding
   limit match_count;
 $$;
-
--- 7. Disable RLS Security 
-ALTER TABLE guild_settings DISABLE ROW LEVEL SECURITY;
-ALTER TABLE guild_channels DISABLE ROW LEVEL SECURITY;
-ALTER TABLE discord_logs DISABLE ROW LEVEL SECURITY;

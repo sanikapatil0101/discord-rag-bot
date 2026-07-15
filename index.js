@@ -105,6 +105,12 @@ async function registerCommands() {
                     required: true
                 }
             ]
+        },
+        {
+            name: 'status',
+            description: 'Show sync state and stored entry counts for this server.',
+            default_member_permissions: PermissionFlagsBits.ManageGuild.toString(),
+            dm_permission: false
         }
     ]);
 }
@@ -171,9 +177,7 @@ async function syncAllConfiguredGuilds() {
 }
 
 client.once('clientReady', async () => {
-    console.log(`\n=================================================`);
-    console.log(`🚀 7-SECOND COOLDOWNS & WARN-ONCE ACTIVE! 🚀`);
-    console.log(`=================================================\n`);
+
     console.log(`Logged in as ${client.user.tag}. Bot is ready.`);
 
     const inviteLink = `https://discord.com/oauth2/authorize?client_id=${client.user.id}&scope=bot+applications.commands&permissions=274877908992`;
@@ -247,6 +251,55 @@ client.on('interactionCreate', async (interaction) => {
             content: 'Only server managers can run this command.',
             flags: MessageFlags.Ephemeral
         });
+        return;
+    }
+
+    if (interaction.commandName === 'status') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+        const { data: channels, error: channelsError } = await supabase
+            .from('guild_channels')
+            .select('channel_id, last_synced_at, last_synced_message_id')
+            .eq('guild_id', interaction.guildId);
+
+        if (channelsError) {
+            await interaction.editReply('Could not load status. Please try again.');
+            return;
+        }
+
+        if (!channels || channels.length === 0) {
+            await interaction.editReply('No help channels configured yet. Run `/setup-help-channel` to get started.');
+            return;
+        }
+
+        const { data: setting } = await supabase
+            .from('guild_settings')
+            .select('trusted_role_id')
+            .eq('guild_id', interaction.guildId)
+            .maybeSingle();
+
+        const { count } = await supabase
+            .from('discord_logs')
+            .select('id', { count: 'exact', head: true })
+            .eq('guild_id', interaction.guildId);
+
+        const channelLines = channels.map((ch) => {
+            const synced = ch.last_synced_at
+                ? `last synced <t:${Math.floor(new Date(ch.last_synced_at).getTime() / 1000)}:R>`
+                : 'never synced';
+            return `• <#${ch.channel_id}> — ${synced}`;
+        }).join('\n');
+
+        const trustedRoleLine = setting?.trusted_role_id
+            ? `<@&${setting.trusted_role_id}>`
+            : 'none (server owner only)';
+
+        await interaction.editReply(
+            `**QuickChat Status**\n` +
+            `Stored entries: **${count ?? 0}**\n` +
+            `Trusted role: ${trustedRoleLine}\n\n` +
+            `**Help channels (${channels.length})**\n${channelLines}`
+        );
         return;
     }
 
@@ -438,7 +491,7 @@ client.on('messageCreate', async (message) => {
             match_threshold: 0.1,
             match_count: 8,
             target_guild_id: message.guild.id,
-            target_channel_id: message.channel.id 
+            target_channel_id: message.channel.id
         });
 
         if (error) throw error;

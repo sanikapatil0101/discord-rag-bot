@@ -79,16 +79,28 @@ async function saveMessageEmbeddings({ supabase, embeddingModel, messages, trust
 
     const messageMap = new Map(messages.map((m) => [m.id, m]));
 
-    let savedCount = 0;
-
+    // Build qualifying pairs first
+    const pairs = [];
     for (const msg of humanMessages) {
         if (!isTrustedMember(msg, trustedRoleId)) continue;
-
         const textToEmbed = await buildEmbedText(msg, messageMap);
         if (!textToEmbed) continue;
+        pairs.push({ msg, textToEmbed });
+    }
 
-        const result = await withRetry(() => embeddingModel.embedContent(textToEmbed));
-        const vector = result.embedding.values;
+    if (pairs.length === 0) return 0;
+
+    // Batch embed all qualifying texts in one API call
+    const batchResult = await withRetry(() =>
+        embeddingModel.batchEmbedContents({
+            requests: pairs.map(({ textToEmbed }) => ({ content: { parts: [{ text: textToEmbed }] } }))
+        })
+    );
+
+    let savedCount = 0;
+    for (let i = 0; i < pairs.length; i++) {
+        const { msg, textToEmbed } = pairs[i];
+        const vector = batchResult.embeddings[i].values;
 
         const { error } = await supabase
             .from('discord_logs')
