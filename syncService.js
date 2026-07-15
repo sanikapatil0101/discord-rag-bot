@@ -13,20 +13,32 @@ async function withRetry(fn, retries = 3, delayMs = 2000) {
 function isTrustedMember(msg, trustedRoleId) {
     if (!msg.member) return false;
     if (msg.member.id === msg.guild.ownerId) return true;
-    if (trustedRoleId && msg.member.roles.cache.has(trustedRoleId)) return true;
+    if (trustedRoleId && msg.member.roles.cache.has(trustedRoleId)) return true;  
     return false;
-}
-
-function buildEmbedText(msg, messageMap) {
-    const referencedId = msg.reference?.messageId;
-    if (!referencedId) return null;
-    const referencedMsg = messageMap.get(referencedId);
-    if (!referencedMsg) return null;
-    return `Q (${referencedMsg.author.username}): ${referencedMsg.content}\nA (${msg.author.username}): ${msg.content}`;
 }
 
 function isHumanTextMessage(msg) {
     return !msg.author.bot && msg.content && msg.content.trim() !== '';
+}
+
+async function buildEmbedText(msg, messageMap) {
+    const referencedId = msg.reference?.messageId;
+    if (!referencedId) return null;
+
+    let referencedMsg = messageMap.get(referencedId);
+
+    if (!referencedMsg) {
+        try {
+            referencedMsg = await msg.channel.messages.fetch(referencedId);
+            messageMap.set(referencedId, referencedMsg);
+        } catch (error) {
+            return null;
+        }
+    }
+
+    if (!referencedMsg || !referencedMsg.content || referencedMsg.author.bot) return null;
+
+    return `Q (${referencedMsg.author.username}): ${referencedMsg.content}\nA (${msg.author.username}): ${msg.content}`;
 }
 
 async function fetchMessagesSince(channel, lastSyncedMessageId = null) {
@@ -72,7 +84,7 @@ async function saveMessageEmbeddings({ supabase, embeddingModel, messages, trust
     for (const msg of humanMessages) {
         if (!isTrustedMember(msg, trustedRoleId)) continue;
 
-        const textToEmbed = buildEmbedText(msg, messageMap);
+        const textToEmbed = await buildEmbedText(msg, messageMap);
         if (!textToEmbed) continue;
 
         const result = await withRetry(() => embeddingModel.embedContent(textToEmbed));

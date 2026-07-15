@@ -23,6 +23,11 @@ const requiredEnvVars = [
 const DATA_DELETE_WARNING = 'If this bot is removed from your server, all messages it read and stored for this server will be deleted from the database.';
 const FALLBACK_ANSWER = "I couldn't find the answer to this in the server history. Could a human admin step in and help out?";
 
+const MAX_QUESTION_LENGTH = 500;
+// Set to 7 seconds
+const COOLDOWN_TIME_MS = 7 * 1000; 
+const userCooldowns = new Map(); 
+
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const embeddingModel = genAI.getGenerativeModel({ model: 'gemini-embedding-001' });
@@ -166,6 +171,9 @@ async function syncAllConfiguredGuilds() {
 }
 
 client.once('clientReady', async () => {
+    console.log(`\n=================================================`);
+    console.log(`🚀 7-SECOND COOLDOWNS & WARN-ONCE ACTIVE! 🚀`);
+    console.log(`=================================================\n`);
     console.log(`Logged in as ${client.user.tag}. Bot is ready.`);
 
     const inviteLink = `https://discord.com/oauth2/authorize?client_id=${client.user.id}&scope=bot+applications.commands&permissions=274877908992`;
@@ -187,7 +195,6 @@ client.once('clientReady', async () => {
         await syncAllConfiguredGuilds();
     }, { timezone: 'UTC' });
 
-    // Health check server for deployment platforms
     http.createServer((req, res) => res.writeHead(200).end('OK')).listen(process.env.PORT || 3000);
     console.log(`Health check server listening on port ${process.env.PORT || 3000}.`);
 });
@@ -222,7 +229,6 @@ client.on('guildDelete', async (guild) => {
         console.error(`Could not delete logs for guild ${guild.id}:`, logsError.message);
     }
 
-    // guild_channels rows cascade delete when guild_settings row is deleted
     const { error: settingsError } = await supabase
         .from('guild_settings')
         .delete()
@@ -369,6 +375,46 @@ client.on('messageCreate', async (message) => {
     if (!message.mentions.has(client.user)) return;
 
     try {
+        const userQuestion = message.content
+            .replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '')
+            .trim();
+
+        if (!userQuestion) {
+            await message.reply('Please ask a question after mentioning me.');
+            return;
+        }
+
+        if (userQuestion.length > MAX_QUESTION_LENGTH) {
+            await message.reply(`Whoa there! Please keep your question under ${MAX_QUESTION_LENGTH} characters. Try summarizing it a bit!`);
+            return;
+        }
+
+        const userId = message.author.id;
+        const now = Date.now();
+        
+        if (userCooldowns.has(userId)) {
+            const cooldownData = userCooldowns.get(userId);
+            
+            if (now < cooldownData.expiresAt) {
+                if (!cooldownData.hasBeenWarned) {
+                    cooldownData.hasBeenWarned = true; // Mark as warned
+                    const timeLeft = ((cooldownData.expiresAt - now) / 1000).toFixed(1);
+                    console.log(` BLOCKED! Warning user to wait ${timeLeft}s.`);
+                    await message.reply(`Please slow down! You can ask another question in ${timeLeft} seconds.`);
+                } else {
+                    console.log(` BLOCKED! User already warned. Silently dropping message.`);
+                }
+                
+                return; // Stop the AI from processing the spam
+            }
+        }
+        
+        console.log(` ALLOWED! Setting new 7s timer for user.`);
+        userCooldowns.set(userId, { 
+            expiresAt: now + COOLDOWN_TIME_MS, 
+            hasBeenWarned: false 
+        });
+
         const { data: setting, error: settingsError } = await supabase
             .from('guild_settings')
             .select('guild_id, guild_channels(channel_id)')
@@ -382,21 +428,11 @@ client.on('messageCreate', async (message) => {
             return;
         }
 
-        const userQuestion = message.content
-            .replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '')
-            .trim();
-
-        if (!userQuestion) {
-            await message.reply('Please ask a question after mentioning me.');
-            return;
-        }
-
         console.log(`Question received in guild ${message.guild.id} from ${message.author.username}: ${userQuestion}`);
 
         const embedResult = await embeddingModel.embedContent(userQuestion);
         const questionVector = embedResult.embedding.values;
 
-        // NEW: Passing both the target_guild_id AND the target_channel_id to enforce Strict Channel Isolation.
         const { data: matchedDocs, error } = await supabase.rpc('match_documents', {
             query_embedding: questionVector,
             match_threshold: 0.1,
