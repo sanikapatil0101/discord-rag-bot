@@ -23,6 +23,7 @@ create table if not exists guild_channels (
 
 create index if not exists guild_channels_guild_id_idx on guild_channels(guild_id);
 
+alter table guild_settings disable row level security;
 alter table guild_channels disable row level security;
 
 -- 4. Discord Logs Table
@@ -42,11 +43,9 @@ create index if not exists discord_logs_guild_id_idx on discord_logs(guild_id);
 create index if not exists discord_logs_channel_id_idx on discord_logs(channel_id);
 create index if not exists discord_logs_message_created_at_idx on discord_logs(message_created_at);
 
--- 5. HNSW vector index for fast similarity search
-create index if not exists discord_logs_embedding_hnsw_idx
-  on discord_logs
-  using hnsw (embedding vector_cosine_ops)
-  with (m = 16, ef_construction = 64);
+-- 5. Note: HNSW and IVFFlat indexes both have a 2000-dimension limit in pgvector.
+-- gemini-embedding-001 produces 3072-dimension vectors so no approximate vector index can be used.
+-- pgvector will use a sequential scan for similarity search, which is fast enough at community server scale.
 
 alter table discord_logs disable row level security;
 

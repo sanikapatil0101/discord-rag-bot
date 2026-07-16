@@ -57,6 +57,8 @@ async function ensureGuildSetting(guildId) {
 
     if (error) {
         console.error(`Could not ensure settings for guild ${guildId}:`, error.message);
+    } else {
+        console.log(`Guild settings ensured for ${guildId}`);
     }
 }
 
@@ -373,6 +375,8 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    await ensureGuildSetting(interaction.guildId);
 
     const { data: existingSetting, error: existingSettingError } = await supabase
         .from('guild_settings')

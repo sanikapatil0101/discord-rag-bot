@@ -152,7 +152,7 @@ The database has three tables with a clear separation of concerns.
 
 Indexes are defined on `guild_channels(guild_id)` and on `discord_logs` for `guild_id`, `channel_id`, and `message_created_at`. The `channel_id` index on `discord_logs` is used when `/remove-help-channel` deletes a specific channel's stored data.
 
-An **HNSW vector index** (`vector_cosine_ops`, `m=16`, `ef_construction=64`) is defined on `discord_logs.embedding`. HNSW (Hierarchical Navigable Small World) is a graph-based approximate nearest neighbour algorithm that reduces similarity search from O(n) sequential scan to approximately O(log n). The `vector_cosine_ops` operator class matches the `<=>` cosine distance operator used in `match_documents`. `m=16` controls the number of connections per node in the graph — higher values improve recall at the cost of more memory. `ef_construction=64` controls how many candidates are explored when building the index — higher values produce a better quality index at the cost of slower build time.
+No approximate vector index is defined on `discord_logs.embedding`. Both HNSW and IVFFlat in pgvector have a hard 2000-dimension limit, and `gemini-embedding-001` produces 3072-dimension vectors — exceeding that limit for both index types. Similarity search uses a sequential scan via the `<=>` cosine distance operator. At community server scale (thousands of rows) this is fast enough. If the dataset were to grow to hundreds of thousands of rows, the correct path would be to switch to a lower-dimension embedding model that stays within the 2000-dimension limit, which would unlock HNSW indexing.
 
 ### 3.2 Why Cosine Similarity for Text
 

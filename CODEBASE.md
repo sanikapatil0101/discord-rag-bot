@@ -142,18 +142,9 @@ Speed up queries that filter by `guild_id` and `channel_id`. The `channel_id` in
 
 ---
 
-### HNSW Vector Index
-```sql
-create index if not exists discord_logs_embedding_hnsw_idx
-  on discord_logs
-  using hnsw (embedding vector_cosine_ops)
-  with (m = 16, ef_construction = 64);
-```
-An HNSW (Hierarchical Navigable Small World) index on the `embedding` column. Speeds up similarity search from a full sequential scan O(n) to approximately O(log n) at scale.
+### Vector Index Note
 
-- `vector_cosine_ops` → matches the `<=>` cosine distance operator used in `match_documents`
-- `m = 16` → number of connections per node in the graph. Higher = better recall, more memory
-- `ef_construction = 64` → how many candidates are explored when building the index. Higher = better quality index, slower build time
+pgvector's HNSW and IVFFlat approximate indexes both have a hard 2000-dimension limit. Since `gemini-embedding-001` produces 3072-dimension vectors, neither index type can be used. Similarity search falls back to a sequential scan using the `<=>` cosine distance operator. At community server scale this is fast enough — a sequential scan only becomes a bottleneck at hundreds of thousands of rows.
 
 ---
 
@@ -673,7 +664,6 @@ PM2 keeps the bot running 24/7 and restarts it on crash. The `env` block injects
 | Incremental Sync | Only fetch new messages since last sync using a cursor | fetchMessagesSince |
 | Multi-channel Support | Each server can have multiple help channels; each has its own sync cursor in `guild_channels` | index.js, syncService.js |
 | Batch Embedding | All qualifying Q&A pairs collected first, then embedded in one `batchEmbedContents` call | saveMessageEmbeddings in syncService.js |
-| HNSW Index | Vector index on `discord_logs.embedding` for fast O(log n) similarity search at scale | schema.sql |
 | Cooldown | Per-user 7-second cooldown between questions — warns once, then silently drops | messageCreate in index.js |
 | Question Length Limit | Max 500 characters per question | messageCreate in index.js |
 | Ephemeral Reply | Discord message only visible to the command user | All slash command responses |

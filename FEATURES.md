@@ -75,11 +75,11 @@ A production-deployed Discord bot that turns a server's help channel history int
 - Queries `guild_channels`, `discord_logs` (count), and `guild_settings` in three lightweight reads
 - Reply is ephemeral — only visible to the admin who ran the command
 
-## HNSW Vector Index
+## Vector Similarity Search
 
-- An HNSW index (`vector_cosine_ops`, `m=16`, `ef_construction=64`) is defined on `discord_logs.embedding`
-- Reduces similarity search from O(n) sequential scan to approximately O(log n) at scale
-- Uses cosine ops to match the `<=>` cosine distance operator used in `match_documents`
+- Similarity search uses pgvector's `<=>` cosine distance operator via a sequential scan
+- pgvector's HNSW and IVFFlat approximate indexes both have a hard 2000-dimension limit — `gemini-embedding-001` produces 3072-dimension vectors so neither index type can be used
+- At community server scale (thousands of rows) a sequential scan is fast enough — index optimisation would only be needed at hundreds of thousands of rows
 
 ## Retry Logic with Exponential Backoff
 
